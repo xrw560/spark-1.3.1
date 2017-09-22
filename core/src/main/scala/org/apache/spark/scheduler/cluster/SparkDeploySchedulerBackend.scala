@@ -86,9 +86,13 @@ private[spark] class SparkDeploySchedulerBackend(
       args, sc.executorEnvs, classPathEntries ++ testingClassPath, libraryPathEntries, javaOpts)
     val appUIAddress = sc.ui.map(_.appUIAddress).getOrElse("")
     //TODO 把参数封装到ApplicationDescription
+    //这个ApplicationDescription，非常重要，后面我们剖析Master的时候，还会来看它
+    //它代表了当前执行的这个application的一些情况
+    //包括application最大需要多少cpu core，每个slave上需要多少内存
     val appDesc = new ApplicationDescription(sc.appName, maxCores, sc.executorMemory, command,
       appUIAddress, sc.eventLogDir, sc.eventLogCodec)
     //TODO 创建一个AppClient把ApplicationDescription通过主构造器传进去
+    //创建AppClient
     client = new AppClient(sc.env.actorSystem, masters, appDesc, this, conf)
     //TODO 然后调用AppClient的start方法，在start方法中创建了一个ClientActor用于与Master通信
     client.start()

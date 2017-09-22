@@ -33,6 +33,11 @@ import org.apache.spark.deploy.master.Master
 import org.apache.spark.util.{ActorLogReceive, Utils, AkkaUtils}
 
 /**
+  * 这是一个接口
+  * 它负责为application与Spark集群进行通信
+  * 它会接收一个spark master的url，以及一个ApplicationDescription，和一个集群事件的监听器，以及各种事件发生时，监听器的回调函数
+  */
+/**
  * Interface allowing applications to speak with a Spark deploy cluster. Takes a master URL,
  * an app description, and a listener for cluster events, and calls back the listener when various
  * events occur.
