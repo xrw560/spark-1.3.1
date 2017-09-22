@@ -34,190 +34,226 @@ import org.apache.spark.deploy.master.DriverState.DriverState
 import org.apache.spark.util.{Clock, SystemClock}
 
 /**
- * Manages the execution of one driver, including automatically restarting the driver on failure.
- * This is currently only used in standalone cluster deploy mode.
- */
+  * Manages the execution of one driver, including automatically restarting the driver on failure.
+  * This is currently only used in standalone cluster deploy mode.
+  */
+/**
+  * 管理一个driver到执行，包括在driver失败时自动重启driver。目前，这种方式仅仅适用于standalone集群部署模式
+  */
 private[spark] class DriverRunner(
-    val conf: SparkConf,
-    val driverId: String,
-    val workDir: File,
-    val sparkHome: File,
-    val driverDesc: DriverDescription,
-    val worker: ActorRef,
-    val workerUrl: String)
-  extends Logging {
+        val conf: SparkConf,
+        val driverId: String,
+        val workDir: File,
+        val sparkHome: File,
+        val driverDesc: DriverDescription,
+        val worker: ActorRef,
+        val workerUrl: String)
+        extends Logging {
 
-  @volatile var process: Option[Process] = None
-  @volatile var killed = false
+    @volatile var process: Option[Process] = None
+    @volatile var killed = false
 
-  // Populated once finished
-  var finalState: Option[DriverState] = None
-  var finalException: Option[Exception] = None
-  var finalExitCode: Option[Int] = None
+    // Populated once finished
+    var finalState: Option[DriverState] = None
+    var finalException: Option[Exception] = None
+    var finalExitCode: Option[Int] = None
 
-  // Decoupled for testing
-  private[deploy] def setClock(_clock: Clock) = clock = _clock
-  private[deploy] def setSleeper(_sleeper: Sleeper) = sleeper = _sleeper
-  private var clock: Clock = new SystemClock()
-  private var sleeper = new Sleeper {
-    def sleep(seconds: Int): Unit = (0 until seconds).takeWhile(f => {Thread.sleep(1000); !killed})
-  }
+    // Decoupled for testing
+    private[deploy] def setClock(_clock: Clock) = clock = _clock
 
-  /** Starts a thread to run and manage the driver. */
-  def start() = {
-    new Thread("DriverRunner for " + driverId) {
-      override def run() {
-        try {
-          val driverDir = createWorkingDirectory()
-          val localJarFilename = downloadUserJar(driverDir)
+    private[deploy] def setSleeper(_sleeper: Sleeper) = sleeper = _sleeper
 
-          def substituteVariables(argument: String): String = argument match {
-            case "{{WORKER_URL}}" => workerUrl
-            case "{{USER_JAR}}" => localJarFilename
-            case other => other
-          }
+    private var clock: Clock = new SystemClock()
+    private var sleeper = new Sleeper {
+        def sleep(seconds: Int): Unit = (0 until seconds).takeWhile(f => {
+            Thread.sleep(1000);
+            !killed
+        })
+    }
 
-          // TODO: If we add ability to submit multiple jars they should also be added here
-          val builder = CommandUtils.buildProcessBuilder(driverDesc.command, driverDesc.mem,
-            sparkHome.getAbsolutePath, substituteVariables)
-          launchDriver(builder, driverDir, driverDesc.supervise)
-        }
-        catch {
-          case e: Exception => finalException = Some(e)
-        }
+    /** Starts a thread to run and manage the driver. */
+    def start() = {
+        // Driver Runner机制分析
 
-        val state =
-          if (killed) {
-            DriverState.KILLED
-          } else if (finalException.isDefined) {
-            DriverState.ERROR
-          } else {
-            finalExitCode match {
-              case Some(0) => DriverState.FINISHED
-              case _ => DriverState.FAILED
+        // 启动一个java的线程
+        new Thread("DriverRunner for " + driverId) {
+            override def run() {
+                try {
+                    // 第一步，创建driver的工作目录
+                    val driverDir = createWorkingDirectory()
+                    // 第二步，下载用户上传的jar(我们编写完了spark程序，如果是java，用maven打jar包，如果是scala，
+                    // 那么会用exports将它导出为jar包)
+                    val localJarFilename = downloadUserJar(driverDir)
+
+                    def substituteVariables(argument: String): String = argument match {
+                        case "{{WORKER_URL}}" => workerUrl
+                        case "{{USER_JAR}}" => localJarFilename
+                        case other => other
+                    }
+
+                    // 构建ProcessBuilder
+                    // 传入了driver的启动命令，需要到内存大小等信息
+                    // TODO: If we add ability to submit multiple jars they should also be added here
+                    val builder = CommandUtils.buildProcessBuilder(driverDesc.command, driverDesc.mem,
+                        sparkHome.getAbsolutePath, substituteVariables)
+                    // 通过ProcessBuilder启动driver进程
+                    launchDriver(builder, driverDir, driverDesc.supervise)
+                }
+                catch {
+                    case e: Exception => finalException = Some(e)
+                }
+
+                // 对driver的推出状态做一些处理
+                val state =
+                    if (killed) {
+                        DriverState.KILLED
+                    } else if (finalException.isDefined) {
+                        DriverState.ERROR
+                    } else {
+                        finalExitCode match {
+                            case Some(0) => DriverState.FINISHED
+                            case _ => DriverState.FAILED
+                        }
+                    }
+
+                finalState = Some(state)
+
+                // 这个DriverRunner这个线程，向它所属的worker的actor，发送一个DriverStateChanged的事件
+                worker ! DriverStateChanged(driverId, state, finalException)
             }
-          }
-
-        finalState = Some(state)
-
-        worker ! DriverStateChanged(driverId, state, finalException)
-      }
-    }.start()
-  }
-
-  /** Terminate this driver (or prevent it from ever starting if not yet started) */
-  def kill() {
-    synchronized {
-      process.foreach(p => p.destroy())
-      killed = true
-    }
-  }
-
-  /**
-   * Creates the working directory for this driver.
-   * Will throw an exception if there are errors preparing the directory.
-   */
-  private def createWorkingDirectory(): File = {
-    val driverDir = new File(workDir, driverId)
-    if (!driverDir.exists() && !driverDir.mkdirs()) {
-      throw new IOException("Failed to create directory " + driverDir)
-    }
-    driverDir
-  }
-
-  /**
-   * Download the user jar into the supplied directory and return its local path.
-   * Will throw an exception if there are errors downloading the jar.
-   */
-  private def downloadUserJar(driverDir: File): String = {
-
-    val jarPath = new Path(driverDesc.jarUrl)
-
-    val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
-    val jarFileSystem = jarPath.getFileSystem(hadoopConf)
-
-    val destPath = new File(driverDir.getAbsolutePath, jarPath.getName)
-    val jarFileName = jarPath.getName
-    val localJarFile = new File(driverDir, jarFileName)
-    val localJarFilename = localJarFile.getAbsolutePath
-
-    if (!localJarFile.exists()) { // May already exist if running multiple workers on one node
-      logInfo(s"Copying user jar $jarPath to $destPath")
-      FileUtil.copy(jarFileSystem, jarPath, destPath, false, hadoopConf)
+        }.start()
     }
 
-    if (!localJarFile.exists()) { // Verify copy succeeded
-      throw new Exception(s"Did not see expected jar $jarFileName in $driverDir")
+    /** Terminate this driver (or prevent it from ever starting if not yet started) */
+    def kill() {
+        synchronized {
+            process.foreach(p => p.destroy())
+            killed = true
+        }
     }
 
-    localJarFilename
-  }
-
-  private def launchDriver(builder: ProcessBuilder, baseDir: File, supervise: Boolean) {
-    builder.directory(baseDir)
-    def initialize(process: Process) = {
-      // Redirect stdout and stderr to files
-      val stdout = new File(baseDir, "stdout")
-      CommandUtils.redirectStream(process.getInputStream, stdout)
-
-      val stderr = new File(baseDir, "stderr")
-      val header = "Launch Command: %s\n%s\n\n".format(
-        builder.command.mkString("\"", "\" \"", "\""), "=" * 40)
-      Files.append(header, stderr, UTF_8)
-      CommandUtils.redirectStream(process.getErrorStream, stderr)
+    /**
+      * Creates the working directory for this driver.
+      * Will throw an exception if there are errors preparing the directory.
+      */
+    private def createWorkingDirectory(): File = {
+        val driverDir = new File(workDir, driverId)
+        if (!driverDir.exists() && !driverDir.mkdirs()) {
+            throw new IOException("Failed to create directory " + driverDir)
+        }
+        driverDir
     }
-    runCommandWithRetry(ProcessBuilderLike(builder), initialize, supervise)
-  }
 
-  private[deploy] def runCommandWithRetry(command: ProcessBuilderLike, initialize: Process => Unit,
-    supervise: Boolean) {
-    // Time to wait between submission retries.
-    var waitSeconds = 1
-    // A run of this many seconds resets the exponential back-off.
-    val successfulRunDuration = 5
+    /**
+      * Download the user jar into the supplied directory and return its local path.
+      * Will throw an exception if there are errors downloading the jar.
+      */
+    /**
+      * 将用户jar包下载到提供的目录中（之前创建的driver工作目录），并返回它在worker本地的路径
+      * 如果下载jar包的过程中出现了任何异常，那么会抛出exception异常
+      */
+    private def downloadUserJar(driverDir: File): String = {
 
-    var keepTrying = !killed
+        //用hadoop jar 里的path
+        val jarPath = new Path(driverDesc.jarUrl)
+        //拿到了hadoop配置
+        val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
+        //获取了HDFS的FileSystem
+        val jarFileSystem = jarPath.getFileSystem(hadoopConf)
 
-    while (keepTrying) {
-      logInfo("Launch Command: " + command.command.mkString("\"", "\" \"", "\""))
+        //创建本地目录
+        val destPath = new File(driverDir.getAbsolutePath, jarPath.getName)
+        val jarFileName = jarPath.getName
+        val localJarFile = new File(driverDir, jarFileName)
+        val localJarFilename = localJarFile.getAbsolutePath
 
-      synchronized {
-        if (killed) { return }
-        process = Some(command.start())
-        initialize(process.get)
-      }
+        //如果jar在本地不存在
+        if (!localJarFile.exists()) { // May already exist if running multiple workers on one node
+            logInfo(s"Copying user jar $jarPath to $destPath")
+            //用FileUtil将jar拷贝到本地
+            FileUtil.copy(jarFileSystem, jarPath, destPath, false, hadoopConf)
+        }
 
-      val processStart = clock.getTimeMillis()
-      val exitCode = process.get.waitFor()
-      if (clock.getTimeMillis() - processStart > successfulRunDuration * 1000) {
-        waitSeconds = 1
-      }
+        //如果拷贝完了，发现jar还是不在，那么就抛出异常
+        if (!localJarFile.exists()) { // Verify copy succeeded
+            throw new Exception(s"Did not see expected jar $jarFileName in $driverDir")
+        }
 
-      if (supervise && exitCode != 0 && !killed) {
-        logInfo(s"Command exited with status $exitCode, re-launching after $waitSeconds s.")
-        sleeper.sleep(waitSeconds)
-        waitSeconds = waitSeconds * 2 // exponential back-off
-      }
-
-      keepTrying = supervise && exitCode != 0 && !killed
-      finalExitCode = Some(exitCode)
+        localJarFilename
     }
-  }
+
+    private def launchDriver(builder: ProcessBuilder, baseDir: File, supervise: Boolean) {
+        builder.directory(baseDir)
+
+        def initialize(process: Process) = {
+            // Redirect stdout and stderr to files
+            // 重定向stdout和stderr输出流到文件中
+            val stdout = new File(baseDir, "stdout")
+            CommandUtils.redirectStream(process.getInputStream, stdout)
+
+            val stderr = new File(baseDir, "stderr")
+            val header = "Launch Command: %s\n%s\n\n".format(
+                builder.command.mkString("\"", "\" \"", "\""), "=" * 40)
+            Files.append(header, stderr, UTF_8)
+            CommandUtils.redirectStream(process.getErrorStream, stderr)
+        }
+
+        runCommandWithRetry(ProcessBuilderLike(builder), initialize, supervise)
+    }
+
+    private[deploy] def runCommandWithRetry(command: ProcessBuilderLike, initialize: Process => Unit,
+            supervise: Boolean) {
+        // Time to wait between submission retries.
+        var waitSeconds = 1
+        // A run of this many seconds resets the exponential back-off.
+        val successfulRunDuration = 5
+
+        var keepTrying = !killed
+
+        while (keepTrying) {
+            logInfo("Launch Command: " + command.command.mkString("\"", "\" \"", "\""))
+
+            synchronized {
+                if (killed) {
+                    return
+                }
+                process = Some(command.start())
+                initialize(process.get)
+            }
+
+            val processStart = clock.getTimeMillis()
+            val exitCode = process.get.waitFor()
+            if (clock.getTimeMillis() - processStart > successfulRunDuration * 1000) {
+                waitSeconds = 1
+            }
+
+            if (supervise && exitCode != 0 && !killed) {
+                logInfo(s"Command exited with status $exitCode, re-launching after $waitSeconds s.")
+                sleeper.sleep(waitSeconds)
+                waitSeconds = waitSeconds * 2 // exponential back-off
+            }
+
+            keepTrying = supervise && exitCode != 0 && !killed
+            finalExitCode = Some(exitCode)
+        }
+    }
 }
 
 private[deploy] trait Sleeper {
-  def sleep(seconds: Int)
+    def sleep(seconds: Int)
 }
 
 // Needed because ProcessBuilder is a final class and cannot be mocked
 private[deploy] trait ProcessBuilderLike {
-  def start(): Process
-  def command: Seq[String]
+    def start(): Process
+
+    def command: Seq[String]
 }
 
 private[deploy] object ProcessBuilderLike {
-  def apply(processBuilder: ProcessBuilder) = new ProcessBuilderLike {
-    def start() = processBuilder.start()
-    def command = processBuilder.command()
-  }
+    def apply(processBuilder: ProcessBuilder) = new ProcessBuilderLike {
+        def start() = processBuilder.start()
+
+        def command = processBuilder.command()
+    }
 }

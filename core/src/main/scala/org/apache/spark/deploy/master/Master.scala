@@ -580,6 +580,7 @@ private[spark] class Master(
 
         // First schedule drivers, they take strict precedence over applications
         // Randomization helps balance drivers
+
         // Random.shuffle的原理，大家要清楚，就是对传入的集合的元素进行随机的打乱
         // 取出了workers中的所有之前注册上来的worker，进行过滤，必须是状态为alive的worker
         // 对状态为alive的worker调用Random的shuffle方法进行随机的打乱
@@ -969,7 +970,7 @@ private[spark] class Master(
     def launchDriver(worker: WorkerInfo, driver: DriverInfo) {
         logInfo("Launching driver " + driver.id + " on worker " + worker.id)
         // 将driver加入worker内存的缓存结构
-        // 将worker内使用的内存和cpu数量，都加上driver需要的内存和数量
+        // 将worker内使用的内存和cpu数量，都加上driver需要的内`存和数量
         worker.addDriver(driver)
         // 同时把worker也加入到driver内部的缓存结构中，互相进行引用，可以互相找到对方
         driver.worker = Some(worker)
