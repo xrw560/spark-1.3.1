@@ -23,47 +23,50 @@ import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleReader}
 import org.apache.spark.util.collection.ExternalSorter
 
 private[spark] class HashShuffleReader[K, C](
-    handle: BaseShuffleHandle[K, _, C],
-    startPartition: Int,
-    endPartition: Int,
-    context: TaskContext)
-  extends ShuffleReader[K, C]
-{
-  require(endPartition == startPartition + 1,
-    "Hash shuffle currently only supports fetching one partition")
+        handle: BaseShuffleHandle[K, _, C],
+        startPartition: Int,
+        endPartition: Int,
+        context: TaskContext)
+        extends ShuffleReader[K, C] {
+    require(endPartition == startPartition + 1,
+        "Hash shuffle currently only supports fetching one partition")
 
-  private val dep = handle.dependency
+    private val dep = handle.dependency
 
-  /** Read the combined key-values for this reduce task */
-  override def read(): Iterator[Product2[K, C]] = {
-    val ser = Serializer.getSerializer(dep.serializer)
-    val iter = BlockStoreShuffleFetcher.fetch(handle.shuffleId, startPartition, context, ser)
+    /** Read the combined key-values for this reduce task */
+    override def read(): Iterator[Product2[K, C]] = {
+        val ser = Serializer.getSerializer(dep.serializer)
+        // 这里，就跟我们之前的图串起来了吧
+        // ResultTask在拉取数据时，其实会用BlockStoreShuffleFetcher来从DAGScheduler的MapOutputTrackerMaster中
+        // 获取自己想要的数据的信息
+        // 然后底层，再通过blockManager从对应的位置，拉取需要的数据
+        val iter = BlockStoreShuffleFetcher.fetch(handle.shuffleId, startPartition, context, ser)
 
-    val aggregatedIter: Iterator[Product2[K, C]] = if (dep.aggregator.isDefined) {
-      if (dep.mapSideCombine) {
-        new InterruptibleIterator(context, dep.aggregator.get.combineCombinersByKey(iter, context))
-      } else {
-        new InterruptibleIterator(context, dep.aggregator.get.combineValuesByKey(iter, context))
-      }
-    } else {
-      require(!dep.mapSideCombine, "Map-side combine without Aggregator specified!")
+        val aggregatedIter: Iterator[Product2[K, C]] = if (dep.aggregator.isDefined) {
+            if (dep.mapSideCombine) {
+                new InterruptibleIterator(context, dep.aggregator.get.combineCombinersByKey(iter, context))
+            } else {
+                new InterruptibleIterator(context, dep.aggregator.get.combineValuesByKey(iter, context))
+            }
+        } else {
+            require(!dep.mapSideCombine, "Map-side combine without Aggregator specified!")
 
-      // Convert the Product2s to pairs since this is what downstream RDDs currently expect
-      iter.asInstanceOf[Iterator[Product2[K, C]]].map(pair => (pair._1, pair._2))
+            // Convert the Product2s to pairs since this is what downstream RDDs currently expect
+            iter.asInstanceOf[Iterator[Product2[K, C]]].map(pair => (pair._1, pair._2))
+        }
+
+        // Sort the output if there is a sort ordering defined.
+        dep.keyOrdering match {
+            case Some(keyOrd: Ordering[K]) =>
+                // Create an ExternalSorter to sort the data. Note that if spark.shuffle.spill is disabled,
+                // the ExternalSorter won't spill to disk.
+                val sorter = new ExternalSorter[K, C, C](ordering = Some(keyOrd), serializer = Some(ser))
+                sorter.insertAll(aggregatedIter)
+                context.taskMetrics.incMemoryBytesSpilled(sorter.memoryBytesSpilled)
+                context.taskMetrics.incDiskBytesSpilled(sorter.diskBytesSpilled)
+                sorter.iterator
+            case None =>
+                aggregatedIter
+        }
     }
-
-    // Sort the output if there is a sort ordering defined.
-    dep.keyOrdering match {
-      case Some(keyOrd: Ordering[K]) =>
-        // Create an ExternalSorter to sort the data. Note that if spark.shuffle.spill is disabled,
-        // the ExternalSorter won't spill to disk.
-        val sorter = new ExternalSorter[K, C, C](ordering = Some(keyOrd), serializer = Some(ser))
-        sorter.insertAll(aggregatedIter)
-        context.taskMetrics.incMemoryBytesSpilled(sorter.memoryBytesSpilled)
-        context.taskMetrics.incDiskBytesSpilled(sorter.diskBytesSpilled)
-        sorter.iterator
-      case None =>
-        aggregatedIter
-    }
-  }
 }
