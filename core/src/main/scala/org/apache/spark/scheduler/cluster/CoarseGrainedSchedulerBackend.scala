@@ -33,372 +33,388 @@ import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
 import org.apache.spark.util.{ActorLogReceive, SerializableBuffer, AkkaUtils, Utils}
 
 /**
- * A scheduler backend that waits for coarse grained executors to connect to it through Akka.
- * This backend holds onto each executor for the duration of the Spark job rather than relinquishing
- * executors whenever a task is done and asking the scheduler to launch a new executor for
- * each new task. Executors may be launched in a variety of ways, such as Mesos tasks for the
- * coarse-grained Mesos mode or standalone processes for Spark's standalone deploy mode
- * (spark.deploy.*).
- */
+  * A scheduler backend that waits for coarse grained executors to connect to it through Akka.
+  * This backend holds onto each executor for the duration of the Spark job rather than relinquishing
+  * executors whenever a task is done and asking the scheduler to launch a new executor for
+  * each new task. Executors may be launched in a variety of ways, such as Mesos tasks for the
+  * coarse-grained Mesos mode or standalone processes for Spark's standalone deploy mode
+  * (spark.deploy.*).
+  */
 private[spark]
 class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val actorSystem: ActorSystem)
-  extends ExecutorAllocationClient with SchedulerBackend with Logging
-{
-  // Use an atomic variable to track total number of cores in the cluster for simplicity and speed
-  var totalCoreCount = new AtomicInteger(0)
-  // Total number of executors that are currently registered
-  var totalRegisteredExecutors = new AtomicInteger(0)
-  val conf = scheduler.sc.conf
-  private val timeout = AkkaUtils.askTimeout(conf)
-  private val akkaFrameSize = AkkaUtils.maxFrameSizeBytes(conf)
-  // Submit tasks only after (registered resources / total expected resources)
-  // is equal to at least this value, that is double between 0 and 1.
-  var minRegisteredRatio =
+        extends ExecutorAllocationClient with SchedulerBackend with Logging {
+    // Use an atomic variable to track total number of cores in the cluster for simplicity and speed
+    var totalCoreCount = new AtomicInteger(0)
+    // Total number of executors that are currently registered
+    var totalRegisteredExecutors = new AtomicInteger(0)
+    val conf = scheduler.sc.conf
+    private val timeout = AkkaUtils.askTimeout(conf)
+    private val akkaFrameSize = AkkaUtils.maxFrameSizeBytes(conf)
+    // Submit tasks only after (registered resources / total expected resources)
+    // is equal to at least this value, that is double between 0 and 1.
+    var minRegisteredRatio =
     math.min(1, conf.getDouble("spark.scheduler.minRegisteredResourcesRatio", 0))
-  // Submit tasks after maxRegisteredWaitingTime milliseconds
-  // if minRegisteredRatio has not yet been reached
-  val maxRegisteredWaitingTime =
+    // Submit tasks after maxRegisteredWaitingTime milliseconds
+    // if minRegisteredRatio has not yet been reached
+    val maxRegisteredWaitingTime =
     conf.getInt("spark.scheduler.maxRegisteredResourcesWaitingTime", 30000)
-  val createTime = System.currentTimeMillis()
+    val createTime = System.currentTimeMillis()
 
-  private val executorDataMap = new HashMap[String, ExecutorData]
+    private val executorDataMap = new HashMap[String, ExecutorData]
 
-  // Number of executors requested from the cluster manager that have not registered yet
-  private var numPendingExecutors = 0
+    // Number of executors requested from the cluster manager that have not registered yet
+    private var numPendingExecutors = 0
 
-  private val listenerBus = scheduler.sc.listenerBus
+    private val listenerBus = scheduler.sc.listenerBus
 
-  // Executors we have requested the cluster manager to kill that have not died yet
-  private val executorsPendingToRemove = new HashSet[String]
+    // Executors we have requested the cluster manager to kill that have not died yet
+    private val executorsPendingToRemove = new HashSet[String]
 
-  //TODO 以后所有的Executor会主动连接这个DriverActor
-  class DriverActor(sparkProperties: Seq[(String, String)]) extends Actor with ActorLogReceive {
-    override protected def log = CoarseGrainedSchedulerBackend.this.log
-    private val addressToExecutorId = new HashMap[Address, String]
+    //TODO 以后所有的Executor会主动连接这个DriverActor
+    class DriverActor(sparkProperties: Seq[(String, String)]) extends Actor with ActorLogReceive {
+        override protected def log = CoarseGrainedSchedulerBackend.this.log
 
-    override def preStart() {
-      // Listen for remote client disconnection events, since they don't go through Akka's watch()
-      context.system.eventStream.subscribe(self, classOf[RemotingLifecycleEvent])
+        private val addressToExecutorId = new HashMap[Address, String]
 
-      // Periodically revive offers to allow delay scheduling to work
-      val reviveInterval = conf.getLong("spark.scheduler.revive.interval", 1000)
-      import context.dispatcher
-      context.system.scheduler.schedule(0.millis, reviveInterval.millis, self, ReviveOffers)
-    }
+        override def preStart() {
+            // Listen for remote client disconnection events, since they don't go through Akka's watch()
+            context.system.eventStream.subscribe(self, classOf[RemotingLifecycleEvent])
 
-    def receiveWithLogging = {
-      //TODO Executor向DriverActor发送的消息
-      case RegisterExecutor(executorId, hostPort, cores, logUrls) =>
-        Utils.checkHostPort(hostPort, "Host port expected " + hostPort)
-        if (executorDataMap.contains(executorId)) {
-          sender ! RegisterExecutorFailed("Duplicate executor ID: " + executorId)
-        } else {
-          logInfo("Registered executor: " + sender + " with ID " + executorId)
-          //TODO DriverActor向Executor发送消息，告诉Executor注册成功
-          sender ! RegisteredExecutor
-          addressToExecutorId(sender.path.address) = executorId
-          totalCoreCount.addAndGet(cores)
-          totalRegisteredExecutors.addAndGet(1)
-          val (host, _) = Utils.parseHostPort(hostPort)
-          val data = new ExecutorData(sender, sender.path.address, host, cores, cores, logUrls)
-          // This must be synchronized because variables mutated
-          // in this block are read when requesting executors
-          CoarseGrainedSchedulerBackend.this.synchronized {
-            executorDataMap.put(executorId, data)
-            if (numPendingExecutors > 0) {
-              numPendingExecutors -= 1
-              logDebug(s"Decremented number of pending executors ($numPendingExecutors left)")
+            // Periodically revive offers to allow delay scheduling to work
+            val reviveInterval = conf.getLong("spark.scheduler.revive.interval", 1000)
+            import context.dispatcher
+            context.system.scheduler.schedule(0.millis, reviveInterval.millis, self, ReviveOffers)
+        }
+
+        def receiveWithLogging = {
+            //TODO Executor向DriverActor发送的消息
+            case RegisterExecutor(executorId, hostPort, cores, logUrls) =>
+                Utils.checkHostPort(hostPort, "Host port expected " + hostPort)
+                if (executorDataMap.contains(executorId)) {
+                    sender ! RegisterExecutorFailed("Duplicate executor ID: " + executorId)
+                } else {
+                    logInfo("Registered executor: " + sender + " with ID " + executorId)
+                    //TODO DriverActor向Executor发送消息，告诉Executor注册成功
+                    sender ! RegisteredExecutor
+                    addressToExecutorId(sender.path.address) = executorId
+                    totalCoreCount.addAndGet(cores)
+                    totalRegisteredExecutors.addAndGet(1)
+                    val (host, _) = Utils.parseHostPort(hostPort)
+                    val data = new ExecutorData(sender, sender.path.address, host, cores, cores, logUrls)
+                    // This must be synchronized because variables mutated
+                    // in this block are read when requesting executors
+                    CoarseGrainedSchedulerBackend.this.synchronized {
+                        executorDataMap.put(executorId, data)
+                        if (numPendingExecutors > 0) {
+                            numPendingExecutors -= 1
+                            logDebug(s"Decremented number of pending executors ($numPendingExecutors left)")
+                        }
+                    }
+                    listenerBus.post(
+                        SparkListenerExecutorAdded(System.currentTimeMillis(), executorId, data))
+                    //TODO 重要 查看是否有任务需要提交（DriverActor -> Executor）
+                    makeOffers()
+                }
+
+            case StatusUpdate(executorId, taskId, state, data) =>
+                scheduler.statusUpdate(taskId, state, data.value)
+                if (TaskState.isFinished(state)) {
+                    executorDataMap.get(executorId) match {
+                        case Some(executorInfo) =>
+                            executorInfo.freeCores += scheduler.CPUS_PER_TASK
+                            makeOffers(executorId)
+                        case None =>
+                            // Ignoring the update since we don't know about the executor.
+                            logWarning(s"Ignored task status update ($taskId state $state) " +
+                                    "from unknown executor $sender with ID $executorId")
+                    }
+                }
+
+            //TODO 调用makeOffers向Executor提交Task
+            case ReviveOffers =>
+                makeOffers()
+
+            case KillTask(taskId, executorId, interruptThread) =>
+                executorDataMap.get(executorId) match {
+                    case Some(executorInfo) =>
+                        executorInfo.executorActor ! KillTask(taskId, executorId, interruptThread)
+                    case None =>
+                        // Ignoring the task kill since the executor is not registered.
+                        logWarning(s"Attempted to kill task $taskId for unknown executor $executorId.")
+                }
+
+            case StopDriver =>
+                sender ! true
+                context.stop(self)
+
+            case StopExecutors =>
+                logInfo("Asking each executor to shut down")
+                for ((_, executorData) <- executorDataMap) {
+                    executorData.executorActor ! StopExecutor
+                }
+                sender ! true
+
+            case RemoveExecutor(executorId, reason) =>
+                removeExecutor(executorId, reason)
+                sender ! true
+
+            case DisassociatedEvent(_, address, _) =>
+                addressToExecutorId.get(address).foreach(removeExecutor(_,
+                    "remote Akka client disassociated"))
+
+            case RetrieveSparkProps =>
+                sender ! sparkProperties
+        }
+
+        // Make fake resource offers on all executors
+        def makeOffers() {
+            //TODO 调用launchTask向Executor提交Task
+            // 第一步，调用TaskSchedulerImpl的resourceOffers()方法，执行任务分配算法，将各个task分配到executor上去
+            // 第二步，分配好task到executor之后，执行自己的launchTasks()方法，将分配的task发送LaunchTask消息
+            // 到对应的executor上去，由executor启动并执行task
+
+            // 给resourceOffers方法传入的是什么？
+            // 传入的是这个Application所有可用的executor，并且将其封装成了WorkerOffer，每个WorkOffer代表了
+            // 每个executor可用的cpu资源数量
+            launchTasks(scheduler.resourceOffers(executorDataMap.map { case (id, executorData) =>
+                new WorkerOffer(id, executorData.executorHost, executorData.freeCores)
+            }.toSeq))
+        }
+
+        // Make fake resource offers on just one executor
+        def makeOffers(executorId: String) {
+            val executorData = executorDataMap(executorId)
+            launchTasks(scheduler.resourceOffers(
+                Seq(new WorkerOffer(executorId, executorData.executorHost, executorData.freeCores))))
+        }
+
+        /**
+          * 根据分配好的情况，去executor上启动相应的task
+          */
+        // Launch tasks returned by a set of resource offers
+        def launchTasks(tasks: Seq[Seq[TaskDescription]]) {
+            for (task <- tasks.flatten) {
+                //拿到序列化器
+                // 首先将每个Executor要执行的task信息，统一进行序列化操作
+                val ser = SparkEnv.get.closureSerializer.newInstance()
+                //TODO 序列化Task
+                val serializedTask = ser.serialize(task)
+                if (serializedTask.limit >= akkaFrameSize - AkkaUtils.reservedSizeBytes) {
+                    val taskSetId = scheduler.taskIdToTaskSetId(task.taskId)
+                    scheduler.activeTaskSets.get(taskSetId).foreach { taskSet =>
+                        try {
+                            var msg = "Serialized task %s:%d was %d bytes, which exceeds max allowed: " +
+                                    "spark.akka.frameSize (%d bytes) - reserved (%d bytes). Consider increasing " +
+                                    "spark.akka.frameSize or using broadcast variables for large values."
+                            msg = msg.format(task.taskId, task.index, serializedTask.limit, akkaFrameSize,
+                                AkkaUtils.reservedSizeBytes)
+                            taskSet.abort(msg)
+                        } catch {
+                            case e: Exception => logError("Exception in error callback", e)
+                        }
+                    }
+                }
+                else {
+                    // 找到对应的executor
+                    val executorData = executorDataMap(task.executorId)
+                    // 给executor上的资源，减去要使用的cpu资源
+                    executorData.freeCores -= scheduler.CPUS_PER_TASK
+                    //TODO 向Executor发送序列化好的Task
+                    // 向executor发送LaunchTask消息，来在executor上启动task
+                    executorData.executorActor ! LaunchTask(new SerializableBuffer(serializedTask))
+                }
             }
-          }
-          listenerBus.post(
-            SparkListenerExecutorAdded(System.currentTimeMillis(), executorId, data))
-          //TODO 重要 查看是否有任务需要提交（DriverActor -> Executor）
-          makeOffers()
         }
 
-      case StatusUpdate(executorId, taskId, state, data) =>
-        scheduler.statusUpdate(taskId, state, data.value)
-        if (TaskState.isFinished(state)) {
-          executorDataMap.get(executorId) match {
-            case Some(executorInfo) =>
-              executorInfo.freeCores += scheduler.CPUS_PER_TASK
-              makeOffers(executorId)
-            case None =>
-              // Ignoring the update since we don't know about the executor.
-              logWarning(s"Ignored task status update ($taskId state $state) " +
-                "from unknown executor $sender with ID $executorId")
-          }
-        }
-
-        //TODO 调用makeOffers向Executor提交Task
-      case ReviveOffers =>
-        makeOffers()
-
-      case KillTask(taskId, executorId, interruptThread) =>
-        executorDataMap.get(executorId) match {
-          case Some(executorInfo) =>
-            executorInfo.executorActor ! KillTask(taskId, executorId, interruptThread)
-          case None =>
-            // Ignoring the task kill since the executor is not registered.
-            logWarning(s"Attempted to kill task $taskId for unknown executor $executorId.")
-        }
-
-      case StopDriver =>
-        sender ! true
-        context.stop(self)
-
-      case StopExecutors =>
-        logInfo("Asking each executor to shut down")
-        for ((_, executorData) <- executorDataMap) {
-          executorData.executorActor ! StopExecutor
-        }
-        sender ! true
-
-      case RemoveExecutor(executorId, reason) =>
-        removeExecutor(executorId, reason)
-        sender ! true
-
-      case DisassociatedEvent(_, address, _) =>
-        addressToExecutorId.get(address).foreach(removeExecutor(_,
-          "remote Akka client disassociated"))
-
-      case RetrieveSparkProps =>
-        sender ! sparkProperties
-    }
-
-    // Make fake resource offers on all executors
-    def makeOffers() {
-      //TODO 调用launchTask向Executor提交Task
-      launchTasks(scheduler.resourceOffers(executorDataMap.map { case (id, executorData) =>
-        new WorkerOffer(id, executorData.executorHost, executorData.freeCores)
-      }.toSeq))
-    }
-
-    // Make fake resource offers on just one executor
-    def makeOffers(executorId: String) {
-      val executorData = executorDataMap(executorId)
-      launchTasks(scheduler.resourceOffers(
-        Seq(new WorkerOffer(executorId, executorData.executorHost, executorData.freeCores))))
-    }
-
-    // Launch tasks returned by a set of resource offers
-    def launchTasks(tasks: Seq[Seq[TaskDescription]]) {
-      for (task <- tasks.flatten) {
-        //拿到序列化器
-        val ser = SparkEnv.get.closureSerializer.newInstance()
-        //TODO 序列化Task
-        val serializedTask = ser.serialize(task)
-        if (serializedTask.limit >= akkaFrameSize - AkkaUtils.reservedSizeBytes) {
-          val taskSetId = scheduler.taskIdToTaskSetId(task.taskId)
-          scheduler.activeTaskSets.get(taskSetId).foreach { taskSet =>
-            try {
-              var msg = "Serialized task %s:%d was %d bytes, which exceeds max allowed: " +
-                "spark.akka.frameSize (%d bytes) - reserved (%d bytes). Consider increasing " +
-                "spark.akka.frameSize or using broadcast variables for large values."
-              msg = msg.format(task.taskId, task.index, serializedTask.limit, akkaFrameSize,
-                AkkaUtils.reservedSizeBytes)
-              taskSet.abort(msg)
-            } catch {
-              case e: Exception => logError("Exception in error callback", e)
+        // Remove a disconnected slave from the cluster
+        def removeExecutor(executorId: String, reason: String): Unit = {
+            executorDataMap.get(executorId) match {
+                case Some(executorInfo) =>
+                    // This must be synchronized because variables mutated
+                    // in this block are read when requesting executors
+                    CoarseGrainedSchedulerBackend.this.synchronized {
+                        addressToExecutorId -= executorInfo.executorAddress
+                        executorDataMap -= executorId
+                        executorsPendingToRemove -= executorId
+                    }
+                    totalCoreCount.addAndGet(-executorInfo.totalCores)
+                    totalRegisteredExecutors.addAndGet(-1)
+                    scheduler.executorLost(executorId, SlaveLost(reason))
+                    listenerBus.post(
+                        SparkListenerExecutorRemoved(System.currentTimeMillis(), executorId, reason))
+                case None => logError(s"Asked to remove non-existent executor $executorId")
             }
-          }
         }
-        else {
-          val executorData = executorDataMap(task.executorId)
-          executorData.freeCores -= scheduler.CPUS_PER_TASK
-          //TODO 向Executor发送序列化好的Task
-          executorData.executorActor ! LaunchTask(new SerializableBuffer(serializedTask))
+    }
+
+    var driverActor: ActorRef = null
+    val taskIdsOnSlave = new HashMap[String, HashSet[String]]
+
+    override def start() {
+        val properties = new ArrayBuffer[(String, String)]
+        for ((key, value) <- scheduler.sc.conf.getAll) {
+            if (key.startsWith("spark.")) {
+                properties += ((key, value))
+            }
         }
-      }
+        // TODO (prashant) send conf instead of properties
+        // TODO　通过ActorSystem创建DriverActor
+        driverActor = actorSystem.actorOf(
+            Props(new DriverActor(properties)), name = CoarseGrainedSchedulerBackend.ACTOR_NAME)
     }
 
-    // Remove a disconnected slave from the cluster
-    def removeExecutor(executorId: String, reason: String): Unit = {
-      executorDataMap.get(executorId) match {
-        case Some(executorInfo) =>
-          // This must be synchronized because variables mutated
-          // in this block are read when requesting executors
-          CoarseGrainedSchedulerBackend.this.synchronized {
-            addressToExecutorId -= executorInfo.executorAddress
-            executorDataMap -= executorId
-            executorsPendingToRemove -= executorId
-          }
-          totalCoreCount.addAndGet(-executorInfo.totalCores)
-          totalRegisteredExecutors.addAndGet(-1)
-          scheduler.executorLost(executorId, SlaveLost(reason))
-          listenerBus.post(
-            SparkListenerExecutorRemoved(System.currentTimeMillis(), executorId, reason))
-        case None => logError(s"Asked to remove non-existent executor $executorId")
-      }
+    def stopExecutors() {
+        try {
+            if (driverActor != null) {
+                logInfo("Shutting down all executors")
+                val future = driverActor.ask(StopExecutors)(timeout)
+                Await.ready(future, timeout)
+            }
+        } catch {
+            case e: Exception =>
+                throw new SparkException("Error asking standalone scheduler to shut down executors", e)
+        }
     }
-  }
 
-  var driverActor: ActorRef = null
-  val taskIdsOnSlave = new HashMap[String, HashSet[String]]
-
-  override def start() {
-    val properties = new ArrayBuffer[(String, String)]
-    for ((key, value) <- scheduler.sc.conf.getAll) {
-      if (key.startsWith("spark.")) {
-        properties += ((key, value))
-      }
+    override def stop() {
+        stopExecutors()
+        try {
+            if (driverActor != null) {
+                val future = driverActor.ask(StopDriver)(timeout)
+                Await.ready(future, timeout)
+            }
+        } catch {
+            case e: Exception =>
+                throw new SparkException("Error stopping standalone scheduler's driver actor", e)
+        }
     }
-    // TODO (prashant) send conf instead of properties
-    // TODO　通过ActorSystem创建DriverActor
-    driverActor = actorSystem.actorOf(
-      Props(new DriverActor(properties)), name = CoarseGrainedSchedulerBackend.ACTOR_NAME)
-  }
 
-  def stopExecutors() {
-    try {
-      if (driverActor != null) {
-        logInfo("Shutting down all executors")
-        val future = driverActor.ask(StopExecutors)(timeout)
-        Await.ready(future, timeout)
-      }
-    } catch {
-      case e: Exception =>
-        throw new SparkException("Error asking standalone scheduler to shut down executors", e)
+    override def reviveOffers() {
+        driverActor ! ReviveOffers
     }
-  }
 
-  override def stop() {
-    stopExecutors()
-    try {
-      if (driverActor != null) {
-        val future = driverActor.ask(StopDriver)(timeout)
-        Await.ready(future, timeout)
-      }
-    } catch {
-      case e: Exception =>
-        throw new SparkException("Error stopping standalone scheduler's driver actor", e)
+    override def killTask(taskId: Long, executorId: String, interruptThread: Boolean) {
+        driverActor ! KillTask(taskId, executorId, interruptThread)
     }
-  }
 
-  override def reviveOffers() {
-    driverActor ! ReviveOffers
-  }
-
-  override def killTask(taskId: Long, executorId: String, interruptThread: Boolean) {
-    driverActor ! KillTask(taskId, executorId, interruptThread)
-  }
-
-  override def defaultParallelism(): Int = {
-    conf.getInt("spark.default.parallelism", math.max(totalCoreCount.get(), 2))
-  }
-
-  // Called by subclasses when notified of a lost worker
-  def removeExecutor(executorId: String, reason: String) {
-    try {
-      val future = driverActor.ask(RemoveExecutor(executorId, reason))(timeout)
-      Await.ready(future, timeout)
-    } catch {
-      case e: Exception =>
-        throw new SparkException("Error notifying standalone scheduler's driver actor", e)
+    override def defaultParallelism(): Int = {
+        conf.getInt("spark.default.parallelism", math.max(totalCoreCount.get(), 2))
     }
-  }
 
-  def sufficientResourcesRegistered(): Boolean = true
-
-  override def isReady(): Boolean = {
-    if (sufficientResourcesRegistered) {
-      logInfo("SchedulerBackend is ready for scheduling beginning after " +
-        s"reached minRegisteredResourcesRatio: $minRegisteredRatio")
-      return true
+    // Called by subclasses when notified of a lost worker
+    def removeExecutor(executorId: String, reason: String) {
+        try {
+            val future = driverActor.ask(RemoveExecutor(executorId, reason))(timeout)
+            Await.ready(future, timeout)
+        } catch {
+            case e: Exception =>
+                throw new SparkException("Error notifying standalone scheduler's driver actor", e)
+        }
     }
-    if ((System.currentTimeMillis() - createTime) >= maxRegisteredWaitingTime) {
-      logInfo("SchedulerBackend is ready for scheduling beginning after waiting " +
-        s"maxRegisteredResourcesWaitingTime: $maxRegisteredWaitingTime(ms)")
-      return true
+
+    def sufficientResourcesRegistered(): Boolean = true
+
+    override def isReady(): Boolean = {
+        if (sufficientResourcesRegistered) {
+            logInfo("SchedulerBackend is ready for scheduling beginning after " +
+                    s"reached minRegisteredResourcesRatio: $minRegisteredRatio")
+            return true
+        }
+        if ((System.currentTimeMillis() - createTime) >= maxRegisteredWaitingTime) {
+            logInfo("SchedulerBackend is ready for scheduling beginning after waiting " +
+                    s"maxRegisteredResourcesWaitingTime: $maxRegisteredWaitingTime(ms)")
+            return true
+        }
+        false
     }
-    false
-  }
 
-  /**
-   * Return the number of executors currently registered with this backend.
-   */
-  def numExistingExecutors: Int = executorDataMap.size
+    /**
+      * Return the number of executors currently registered with this backend.
+      */
+    def numExistingExecutors: Int = executorDataMap.size
 
-  /**
-   * Request an additional number of executors from the cluster manager.
-   * @return whether the request is acknowledged.
-   */
-  final override def requestExecutors(numAdditionalExecutors: Int): Boolean = synchronized {
-    if (numAdditionalExecutors < 0) {
-      throw new IllegalArgumentException(
-        "Attempted to request a negative number of additional executor(s) " +
-        s"$numAdditionalExecutors from the cluster manager. Please specify a positive number!")
+    /**
+      * Request an additional number of executors from the cluster manager.
+      *
+      * @return whether the request is acknowledged.
+      */
+    final override def requestExecutors(numAdditionalExecutors: Int): Boolean = synchronized {
+        if (numAdditionalExecutors < 0) {
+            throw new IllegalArgumentException(
+                "Attempted to request a negative number of additional executor(s) " +
+                        s"$numAdditionalExecutors from the cluster manager. Please specify a positive number!")
+        }
+        logInfo(s"Requesting $numAdditionalExecutors additional executor(s) from the cluster manager")
+        logDebug(s"Number of pending executors is now $numPendingExecutors")
+        numPendingExecutors += numAdditionalExecutors
+        // Account for executors pending to be added or removed
+        val newTotal = numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size
+        doRequestTotalExecutors(newTotal)
     }
-    logInfo(s"Requesting $numAdditionalExecutors additional executor(s) from the cluster manager")
-    logDebug(s"Number of pending executors is now $numPendingExecutors")
-    numPendingExecutors += numAdditionalExecutors
-    // Account for executors pending to be added or removed
-    val newTotal = numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size
-    doRequestTotalExecutors(newTotal)
-  }
 
-  /**
-   * Express a preference to the cluster manager for a given total number of executors. This can
-   * result in canceling pending requests or filing additional requests.
-   * @return whether the request is acknowledged.
-   */
-  final override def requestTotalExecutors(numExecutors: Int): Boolean = synchronized {
-    if (numExecutors < 0) {
-      throw new IllegalArgumentException(
-        "Attempted to request a negative number of executor(s) " +
-          s"$numExecutors from the cluster manager. Please specify a positive number!")
+    /**
+      * Express a preference to the cluster manager for a given total number of executors. This can
+      * result in canceling pending requests or filing additional requests.
+      *
+      * @return whether the request is acknowledged.
+      */
+    final override def requestTotalExecutors(numExecutors: Int): Boolean = synchronized {
+        if (numExecutors < 0) {
+            throw new IllegalArgumentException(
+                "Attempted to request a negative number of executor(s) " +
+                        s"$numExecutors from the cluster manager. Please specify a positive number!")
+        }
+        numPendingExecutors =
+                math.max(numExecutors - numExistingExecutors + executorsPendingToRemove.size, 0)
+        doRequestTotalExecutors(numExecutors)
     }
-    numPendingExecutors =
-      math.max(numExecutors - numExistingExecutors + executorsPendingToRemove.size, 0)
-    doRequestTotalExecutors(numExecutors)
-  }
 
-  /**
-   * Request executors from the cluster manager by specifying the total number desired,
-   * including existing pending and running executors.
-   *
-   * The semantics here guarantee that we do not over-allocate executors for this application,
-   * since a later request overrides the value of any prior request. The alternative interface
-   * of requesting a delta of executors risks double counting new executors when there are
-   * insufficient resources to satisfy the first request. We make the assumption here that the
-   * cluster manager will eventually fulfill all requests when resources free up.
-   *
-   * @return whether the request is acknowledged.
-   */
-  protected def doRequestTotalExecutors(requestedTotal: Int): Boolean = false
+    /**
+      * Request executors from the cluster manager by specifying the total number desired,
+      * including existing pending and running executors.
+      *
+      * The semantics here guarantee that we do not over-allocate executors for this application,
+      * since a later request overrides the value of any prior request. The alternative interface
+      * of requesting a delta of executors risks double counting new executors when there are
+      * insufficient resources to satisfy the first request. We make the assumption here that the
+      * cluster manager will eventually fulfill all requests when resources free up.
+      *
+      * @return whether the request is acknowledged.
+      */
+    protected def doRequestTotalExecutors(requestedTotal: Int): Boolean = false
 
-  /**
-   * Request that the cluster manager kill the specified executors.
-   * Return whether the kill request is acknowledged.
-   */
-  final override def killExecutors(executorIds: Seq[String]): Boolean = synchronized {
-    logInfo(s"Requesting to kill executor(s) ${executorIds.mkString(", ")}")
-    val filteredExecutorIds = new ArrayBuffer[String]
-    executorIds.foreach { id =>
-      if (executorDataMap.contains(id)) {
-        filteredExecutorIds += id
-      } else {
-        logWarning(s"Executor to kill $id does not exist!")
-      }
+    /**
+      * Request that the cluster manager kill the specified executors.
+      * Return whether the kill request is acknowledged.
+      */
+    final override def killExecutors(executorIds: Seq[String]): Boolean = synchronized {
+        logInfo(s"Requesting to kill executor(s) ${executorIds.mkString(", ")}")
+        val filteredExecutorIds = new ArrayBuffer[String]
+        executorIds.foreach { id =>
+            if (executorDataMap.contains(id)) {
+                filteredExecutorIds += id
+            } else {
+                logWarning(s"Executor to kill $id does not exist!")
+            }
+        }
+        // Killing executors means effectively that we want less executors than before, so also update
+        // the target number of executors to avoid having the backend allocate new ones.
+        val newTotal = (numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size
+                - filteredExecutorIds.size)
+        doRequestTotalExecutors(newTotal)
+
+        executorsPendingToRemove ++= filteredExecutorIds
+        doKillExecutors(filteredExecutorIds)
     }
-    // Killing executors means effectively that we want less executors than before, so also update
-    // the target number of executors to avoid having the backend allocate new ones.
-    val newTotal = (numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size
-      - filteredExecutorIds.size)
-    doRequestTotalExecutors(newTotal)
 
-    executorsPendingToRemove ++= filteredExecutorIds
-    doKillExecutors(filteredExecutorIds)
-  }
-
-  /**
-   * Kill the given list of executors through the cluster manager.
-   * Return whether the kill request is acknowledged.
-   */
-  protected def doKillExecutors(executorIds: Seq[String]): Boolean = false
+    /**
+      * Kill the given list of executors through the cluster manager.
+      * Return whether the kill request is acknowledged.
+      */
+    protected def doKillExecutors(executorIds: Seq[String]): Boolean = false
 
 }
 
 private[spark] object CoarseGrainedSchedulerBackend {
-  val ACTOR_NAME = "CoarseGrainedScheduler"
+    val ACTOR_NAME = "CoarseGrainedScheduler"
 }
