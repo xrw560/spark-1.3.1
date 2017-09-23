@@ -26,46 +26,48 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 
 /**
- * A task that sends back the output to the driver application.
- *
- * See [[Task]] for more information.
- *
- * @param stageId id of the stage this task belongs to
- * @param taskBinary broadcasted version of the serialized RDD and the function to apply on each
- *                   partition of the given RDD. Once deserialized, the type should be
- *                   (RDD[T], (TaskContext, Iterator[T]) => U).
- * @param partition partition of the RDD this task is associated with
- * @param locs preferred task execution locations for locality scheduling
- * @param outputId index of the task in this job (a job can launch tasks on only a subset of the
- *                 input RDD's partitions).
- */
+  * A task that sends back the output to the driver application.
+  *
+  * See [[Task]] for more information.
+  *
+  * @param stageId    id of the stage this task belongs to
+  * @param taskBinary broadcasted version of the serialized RDD and the function to apply on each
+  *                   partition of the given RDD. Once deserialized, the type should be
+  *                   (RDD[T], (TaskContext, Iterator[T]) => U).
+  * @param partition  partition of the RDD this task is associated with
+  * @param locs       preferred task execution locations for locality scheduling
+  * @param outputId   index of the task in this job (a job can launch tasks on only a subset of the
+  *                   input RDD's partitions).
+  */
 private[spark] class ResultTask[T, U](
-    stageId: Int,
-    taskBinary: Broadcast[Array[Byte]],
-    partition: Partition,
-    @transient locs: Seq[TaskLocation],
-    val outputId: Int)
-  extends Task[U](stageId, partition.index) with Serializable {
+        stageId: Int,
+        taskBinary: Broadcast[Array[Byte]],
+        partition: Partition,
+        @transient locs: Seq[TaskLocation],
+        val outputId: Int)
+        extends Task[U](stageId, partition.index) with Serializable {
 
-  @transient private[this] val preferredLocs: Seq[TaskLocation] = {
-    if (locs == null) Nil else locs.toSet.toSeq
-  }
+    @transient private[this] val preferredLocs: Seq[TaskLocation] = {
+        if (locs == null) Nil else locs.toSet.toSeq
+    }
 
-  override def runTask(context: TaskContext): U = {
-    // Deserialize the RDD and the func using the broadcast variables.
-    //得到一个序列化器
-    val ser = SparkEnv.get.closureSerializer.newInstance()
-    //反序列化Task，得到RDD和作用在RDD上的函数
-    val (rdd, func) = ser.deserialize[(RDD[T], (TaskContext, Iterator[T]) => U)](
-      ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)
+    override def runTask(context: TaskContext): U = {
+        // Deserialize the RDD and the func using the broadcast variables.
+        //得到一个序列化器
+        // 进行了基本的反序列化
+        val ser = SparkEnv.get.closureSerializer.newInstance()
+        //反序列化Task，得到RDD和作用在RDD上的函数
+        val (rdd, func) = ser.deserialize[(RDD[T], (TaskContext, Iterator[T]) => U)](
+            ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)
 
-    metrics = Some(context.taskMetrics)
-    //开始调用这个函数
-    func(context, rdd.iterator(partition, context))
-  }
+        metrics = Some(context.taskMetrics)
+        //开始调用这个函数
+        // 执行通过rdd的iterator，执行我们定义的算子和函数
+        func(context, rdd.iterator(partition, context))
+    }
 
-  // This is only callable on the driver side.
-  override def preferredLocations: Seq[TaskLocation] = preferredLocs
+    // This is only callable on the driver side.
+    override def preferredLocations: Seq[TaskLocation] = preferredLocs
 
-  override def toString = "ResultTask(" + stageId + ", " + partitionId + ")"
+    override def toString = "ResultTask(" + stageId + ", " + partitionId + ")"
 }

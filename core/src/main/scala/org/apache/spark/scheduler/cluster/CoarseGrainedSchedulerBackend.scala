@@ -116,6 +116,9 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val actorSyste
                     makeOffers()
                 }
 
+            /**
+              * 处理task执行结束的事件
+              */
             case StatusUpdate(executorId, taskId, state, data) =>
                 scheduler.statusUpdate(taskId, state, data.value)
                 if (TaskState.isFinished(state)) {

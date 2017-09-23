@@ -130,6 +130,9 @@ private[spark] class CoarseGrainedExecutorBackend(
             context.system.shutdown()
     }
 
+    /**
+      * 这里会发送StatusUpdate消息，给SparkDeployScheduleBackend
+      */
     override def statusUpdate(taskId: Long, state: TaskState, data: ByteBuffer) {
         driver ! StatusUpdate(executorId, taskId, state, data)
     }
