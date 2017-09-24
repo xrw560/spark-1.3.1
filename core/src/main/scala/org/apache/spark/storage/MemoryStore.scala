@@ -270,6 +270,9 @@ private[spark] class MemoryStore(blockManager: BlockManager, maxMemory: Long)
                                 // If the first request is not granted, try again after ensuring free space
                                 // If there is still not enough space, give up and drop the partition
                                 val spaceToEnsure = maxUnrollMemory - currentUnrollMemory
+                                // 反复循环，判断，只要还有数据没有写入内存，并且呢，可以继续尝试往内存中写
+                                // 那么就判断，如果内存大小不够存放数据
+                                // ok,调用上节课分析过的ensureFreeSpace方法，尝试清空一些内存空间
                                 if (spaceToEnsure > 0) {
                                     val result = ensureFreeSpace(blockId, spaceToEnsure)
                                     droppedBlocks ++= result.droppedBlocks

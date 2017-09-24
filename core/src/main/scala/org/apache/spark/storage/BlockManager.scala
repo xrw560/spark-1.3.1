@@ -654,6 +654,10 @@ private[spark] class BlockManager(
     /**
       * Get a block from the block manager (either local or remote).
       */
+    /**
+      * 通过BlockManager获取数据的入口方法
+      * 就跟我们上一讲说的BlockManager的工作原理一样，获取的时候，优先从本地获取，如果本地没有，那么从远程获取
+      */
     def get(blockId: BlockId): Option[BlockResult] = {
         val local = getLocal(blockId)
         if (local.isDefined) {
@@ -751,6 +755,7 @@ private[spark] class BlockManager(
         /* Remember the block's storage level so that we can correctly drop it to disk if it needs
          * to be dropped right after it got put into memory. Note, however, that other threads will
          * not be able to get() this block until we call markReady on its BlockInfo. */
+
         // 为要写入的block，创建一个BlockInfo,并将其放入BlockInfo map中，缓存起来
         val putBlockInfo = {
             val tinfo = new BlockInfo(level, tellMaster)

@@ -239,6 +239,9 @@ abstract class RDD[T: ClassTag](
       * subclasses of RDD.
       */
     final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
+        // 这里就是说，如果StorageLevel不为NONE，就是说，我们之前持久化过RDD
+        // 那么就不要直接去从父RDD执行算子，计算新的RDD的partition了
+        // 优先尝试使用CacheManager，去获取持久化的数据
         if (storageLevel != StorageLevel.NONE) {
             // CacheManger的东西，先不讲，最后，倒数第二讲，会剖析CacheManager
             SparkEnv.get.cacheManager.getOrCompute(this, split, context, storageLevel)
