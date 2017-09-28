@@ -113,6 +113,12 @@ class SQLContext(@transient val sparkContext: SparkContext)
     @transient
     protected[sql] lazy val functionRegistry: FunctionRegistry = new SimpleFunctionRegistry(true)
 
+    /**
+      * Analyser的所在地
+      * QueryExecution实际执行SQL语句的时候，第一步，就是用之前SqlParser解析出来的纯逻辑的封装了语法树的
+      * Unresolved LogicalPlan，去调用Analyser的apply()方法，来将Unresolved LogicalPlan来生成一个
+      * Resolved LogicalPlan
+      */
     @transient
     protected[sql] lazy val analyzer: Analyzer =
         new Analyzer(catalog, functionRegistry, caseSensitive = true) {
@@ -133,15 +139,28 @@ class SQLContext(@transient val sparkContext: SparkContext)
     protected[sql] val ddlParser = new DDLParser(sqlParser.apply(_))
 
     @transient
+    /**
+      * SqlParser，实际上是SparkSQLParser的实例
+      * SparkSQLParser里面，又封装了catalyst中的SqlParser
+      */
     protected[sql] val sqlParser = {
         val fallback = new catalyst.SqlParser
         new SparkSQLParser(fallback(_))
     }
 
     protected[sql] def parseSql(sql: String): LogicalPlan = {
+        // parseSql()方法，是SqlParser执行的入口
+        // 这里，实际上，会调用SqlParser的apply()方法，来获取一个对SQL语句解析后的LogicalPlan
         ddlParser(sql, false).getOrElse(sqlParser(sql))
     }
 
+    /**
+      * 实际上，在后面你操作DataFrame的时候
+      * 在实际真正不可避免地要执行SQL语句，真正针对数据进行查询，并返回结果的时候
+      * 就会触发SQLContext的executeSql()方法的执行
+      * 该方法，实际上会返回一个QueryExecution
+      * 这个QueryExecution，实际上，就会触发整个后续的流程
+      */
     protected[sql] def executeSql(sql: String): this.QueryExecution = executePlan(parseSql(sql))
 
     protected[sql] def executePlan(plan: LogicalPlan) = new this.QueryExecution(plan)
@@ -950,10 +969,29 @@ class SQLContext(@transient val sparkContext: SparkContext)
             // SQLContext的sql()方法正式进入执行阶段
             // 那么这里，实际上，首先，Spark SQL也是有lazy特性的
             // Spark SQL的lazy特性，我们这里通过源码来深度剖析一下
+
             // 其实，你调用sql()去执行一条SQL语句的时候，默认只会执行我们之前剖析的Spark SQL原理的第一步
             // 就是调用SqlParser组件针对SQL语句生成一个Unresolved LogicalPlan
             // 然后，将Unresolved LogicalPlan和SQLContext自身的实例(this)，封装为一个DataFrame
             // 返回DataFrame给用户，其中仅仅封装了SQL语句的Unresolved LogicalPlan
+
+            // 在用户拿到封装了Unresolved LogicalPlan 的DataFrame之后
+            // 然后可以，执行一些show()、select()、groupBy()、show()这样的操作
+            // 或者拿到DataFrame对应的RDD，执行一系列transformation操作，最后执行一个action操作
+
+            // 在执行了DataFrame的上述要求返回结果数据的操作之后，才会实际去触发Spark SQL后续的SQL执行流程
+
+            // 这里，我们首先看第一步
+            // parseSql()方法，调用SqlParser解析SQL，获取Unresolved LogicalPlan
+
+            // parseSql()方法讲完了，它底层，总结一下
+            // 其实就是调用了SqlParser的apply()方法，即由SqlParser将SQL语句通过内部的各种select、insert这种
+            // 词法、语法解析器，去进行解析，然后将SQL语句的各个部分，组装成一个LogicalPlan
+            // 但是这里的LogicalPlan，只是一颗语法树，还不知道自己具体执行的时候，那些数据从哪里来
+            // 所以，叫做Unresolved LogicalPlan
+
+            // 那么解析了SQL，拿到Unresolved LogicalPlan之后，会封装一个DataFrame，返回给用户
+            // 用户此时就可以用DataFrame执行各种操作了
             DataFrame(this, parseSql(sqlText))
         } else {
             sys.error(s"Unsupported SQL dialect: ${conf.dialect}")
@@ -1021,6 +1059,10 @@ class SQLContext(@transient val sparkContext: SparkContext)
 
         def numPartitions: Int = self.conf.numShufflePartitions
 
+        /**
+          * 这里啊，就是会用一些策略，比如说DataSourceStrategy
+          * 针对逻辑执行计划，执行进一步的具体化和物化
+          */
         def strategies: Seq[Strategy] =
             experimental.extraStrategies ++ (
                     DataSourceStrategy ::
@@ -1103,23 +1145,51 @@ class SQLContext(@transient val sparkContext: SparkContext)
     protected[sql] class QueryExecution(val logical: LogicalPlan) {
         def assertAnalyzed(): Unit = analyzer.checkAnalysis(analyzed)
 
+        // 这个东东，大家可以看到，只要用一个Unresolved LogicalPlan去构造一个QueryExecution的实例对象
+        // 那么SQL语句的实际执行就会一步一步的触发
+
+        // Analyser的apply()方法执行结束后
+        // 得到一个Resovled LogicalPlan
         lazy val analyzed: LogicalPlan = analyzer(logical)
+
+        //这里，其实是会通过cacheManager，执行一个缓存的操作，这里有一个cacheManager，调用了其
+        // useCachedData方法
+        // 这里的意思就是说，如果之前已经缓存过这个执行计划，又再次执行的话
+        // 那么，其实可以使用缓存中的数据
         lazy val withCachedData: LogicalPlan = {
             assertAnalyzed()
             cacheManager.useCachedData(analyzed)
         }
+
+        // 调用Optimizer的apply()方法
+        // 针对Resolved LogicalPlan调用Optimizer，进行优化
+        // 获得Optimized LogicalPlan，获得优化后的逻辑执行计划
         lazy val optimizedPlan: LogicalPlan = optimizer(withCachedData)
 
         // TODO: Don't just pick the first one...
+
+        // 这里很重要，用Optimizer针对Resolved LogicalPlan生成的Optimized LogicalPlan
+        // 用SparkPlanner，创建一个SparkPlan
         lazy val sparkPlan: SparkPlan = {
             SparkPlan.currentContext.set(self)
             planner(optimizedPlan).next()
         }
         // executedPlan should not be used to initialize any SparkPlan. It should be
         // only used for execution.
+
+        // 使用SparkPlan生成一个可以执行的SparkPlan
+        // 此时就是PhysicalPlan，物理执行计划，直接就是可以执行了
+        // 此时的话，就是，已经绑定了物理的数据源
+        // 而且，知道对各个表的join，如果进行Join
+        // 包括Join的时候，默认Spark内部是会对小表进行广播的
         lazy val executedPlan: SparkPlan = prepareForExecution(sparkPlan)
 
         /** Internal version of the RDD. Avoids copies and has no schema */
+
+        // 最后一步，调用SparkPlan(封装了PhysicalPlan的SparkPlan)的execute()方法
+        // executer()方法，实际上，就会去执行物理执行计划
+        // 最后一个重要的点，就是，execute()方法，返回的是什么？
+        // RDD[Row]，就是一个元素类型为Row的
         lazy val toRdd: RDD[Row] = executedPlan.execute()
 
         protected def stringOrError[A](f: => A): String =

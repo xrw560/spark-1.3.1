@@ -26,109 +26,120 @@ import scala.util.parsing.input.CharArrayReader.EofCh
 import org.apache.spark.sql.catalyst.plans.logical._
 
 private[sql] object KeywordNormalizer {
-  def apply(str: String): String = str.toLowerCase()
+    def apply(str: String): String = str.toLowerCase()
 }
 
 private[sql] abstract class AbstractSparkSQLParser
-  extends StandardTokenParsers with PackratParsers {
+        extends StandardTokenParsers with PackratParsers {
 
-  def apply(input: String): LogicalPlan = {
-    // Initialize the Keywords.
-    lexical.initialize(reservedWords)
-    phrase(start)(new lexical.Scanner(input)) match {
-      case Success(plan, _) => plan
-      case failureOrError => sys.error(failureOrError.toString)
+    /**
+      * 实际上，调用SqlParser的apply()方法，将SQL接写成LogicalPlan时
+      * 会调用到SqlParser的父类，AbstractSparkSQLParser的apply()方法中
+      */
+    def apply(input: String): LogicalPlan = {
+        // Initialize the Keywords.
+        lexical.initialize(reservedWords)
+        // 这个代码的意思，其实就是说，用lexical.Scanner，针对SQL语句，来进行语法检查、分析，满足语法检查结果的话
+        // 就使用SQL解析器，针对SQL进行解析，包括词法解析(将SQL语句解析成一个一个的短语，token)、语法解析
+        // 最后生成一个Unresolved LogicalPlan
+        // 该LogicalPlan仅仅针对SQL语句本身生成，纯语法
+        // 不涉及任何关联的数据源等等信息
+        phrase(start)(new lexical.Scanner(input)) match {
+            case Success(plan, _) => plan
+            case failureOrError => sys.error(failureOrError.toString)
+        }
     }
-  }
 
-  protected case class Keyword(str: String) {
-    def normalize: String = KeywordNormalizer(str)
-    def parser: Parser[String] = normalize
-  }
+    protected case class Keyword(str: String) {
+        def normalize: String = KeywordNormalizer(str)
 
-  protected implicit def asParser(k: Keyword): Parser[String] = k.parser
+        def parser: Parser[String] = normalize
+    }
 
-  // By default, use Reflection to find the reserved words defined in the sub class.
-  // NOTICE, Since the Keyword properties defined by sub class, we couldn't call this
-  // method during the parent class instantiation, because the sub class instance
-  // isn't created yet.
-  protected lazy val reservedWords: Seq[String] =
+    protected implicit def asParser(k: Keyword): Parser[String] = k.parser
+
+    // By default, use Reflection to find the reserved words defined in the sub class.
+    // NOTICE, Since the Keyword properties defined by sub class, we couldn't call this
+    // method during the parent class instantiation, because the sub class instance
+    // isn't created yet.
+    protected lazy val reservedWords: Seq[String] =
     this
-      .getClass
-      .getMethods
-      .filter(_.getReturnType == classOf[Keyword])
-      .map(_.invoke(this).asInstanceOf[Keyword].normalize)
+            .getClass
+            .getMethods
+            .filter(_.getReturnType == classOf[Keyword])
+            .map(_.invoke(this).asInstanceOf[Keyword].normalize)
 
-  // Set the keywords as empty by default, will change that later.
-  override val lexical = new SqlLexical
+    // Set the keywords as empty by default, will change that later.
+    override val lexical = new SqlLexical
 
-  protected def start: Parser[LogicalPlan]
+    protected def start: Parser[LogicalPlan]
 
-  // Returns the whole input string
-  protected lazy val wholeInput: Parser[String] = new Parser[String] {
-    def apply(in: Input): ParseResult[String] =
-      Success(in.source.toString, in.drop(in.source.length()))
-  }
+    // Returns the whole input string
+    protected lazy val wholeInput: Parser[String] = new Parser[String] {
+        def apply(in: Input): ParseResult[String] =
+            Success(in.source.toString, in.drop(in.source.length()))
+    }
 
-  // Returns the rest of the input string that are not parsed yet
-  protected lazy val restInput: Parser[String] = new Parser[String] {
-    def apply(in: Input): ParseResult[String] =
-      Success(
-        in.source.subSequence(in.offset, in.source.length()).toString,
-        in.drop(in.source.length()))
-  }
+    // Returns the rest of the input string that are not parsed yet
+    protected lazy val restInput: Parser[String] = new Parser[String] {
+        def apply(in: Input): ParseResult[String] =
+            Success(
+                in.source.subSequence(in.offset, in.source.length()).toString,
+                in.drop(in.source.length()))
+    }
 }
 
+/**
+  * 这里的意思，就是说，用SqlLexical，对SQL语句，执行一个检查，如果满足检查的话，那么才去分析
+  * 否则，说明SQL本身的语法，就有问题
+  */
 class SqlLexical extends StdLexical {
-  case class FloatLit(chars: String) extends Token {
-    override def toString: String = chars
-  }
 
-  /* This is a work around to support the lazy setting */
-  def initialize(keywords: Seq[String]): Unit = {
-    reserved.clear()
-    reserved ++= keywords
-  }
+    case class FloatLit(chars: String) extends Token {
+        override def toString: String = chars
+    }
 
-  delimiters += (
-    "@", "*", "+", "-", "<", "=", "<>", "!=", "<=", ">=", ">", "/", "(", ")",
-    ",", ";", "%", "{", "}", ":", "[", "]", ".", "&", "|", "^", "~", "<=>"
-  )
+    /* This is a work around to support the lazy setting */
+    def initialize(keywords: Seq[String]): Unit = {
+        reserved.clear()
+        reserved ++= keywords
+    }
 
-  protected override def processIdent(name: String) = {
-    val token = KeywordNormalizer(name)
-    if (reserved contains token) Keyword(token) else Identifier(name)
-  }
-
-  override lazy val token: Parser[Token] =
-    ( identChar ~ (identChar | digit).* ^^
-      { case first ~ rest => processIdent((first :: rest).mkString) }
-    | rep1(digit) ~ ('.' ~> digit.*).? ^^ {
-        case i ~ None    => NumericLit(i.mkString)
-        case i ~ Some(d) => FloatLit(i.mkString + "." + d.mkString)
-      }
-    | '\'' ~> chrExcept('\'', '\n', EofCh).* <~ '\'' ^^
-      { case chars => StringLit(chars mkString "") }
-    | '"' ~> chrExcept('"', '\n', EofCh).* <~ '"' ^^
-      { case chars => StringLit(chars mkString "") }
-    | '`' ~> chrExcept('`', '\n', EofCh).* <~ '`' ^^
-      { case chars => Identifier(chars mkString "") }
-    | EofCh ^^^ EOF
-    | '\'' ~> failure("unclosed string literal")
-    | '"' ~> failure("unclosed string literal")
-    | delim
-    | failure("illegal character")
+    delimiters += (
+            "@", "*", "+", "-", "<", "=", "<>", "!=", "<=", ">=", ">", "/", "(", ")",
+            ",", ";", "%", "{", "}", ":", "[", "]", ".", "&", "|", "^", "~", "<=>"
     )
 
-  override def identChar: Parser[Elem] = letter | elem('_')
+    protected override def processIdent(name: String) = {
+        val token = KeywordNormalizer(name)
+        if (reserved contains token) Keyword(token) else Identifier(name)
+    }
 
-  override def whitespace: Parser[Any] =
-    ( whitespaceChar
-    | '/' ~ '*' ~ comment
-    | '/' ~ '/' ~ chrExcept(EofCh, '\n').*
-    | '#' ~ chrExcept(EofCh, '\n').*
-    | '-' ~ '-' ~ chrExcept(EofCh, '\n').*
-    | '/' ~ '*' ~ failure("unclosed comment")
-    ).*
+    override lazy val token: Parser[Token] =
+        (identChar ~ (identChar | digit).* ^^ { case first ~ rest => processIdent((first :: rest).mkString) }
+                | rep1(digit) ~ ('.' ~> digit.*).? ^^ {
+            case i ~ None => NumericLit(i.mkString)
+            case i ~ Some(d) => FloatLit(i.mkString + "." + d.mkString)
+        }
+                | '\'' ~> chrExcept('\'', '\n', EofCh).* <~ '\'' ^^ { case chars => StringLit(chars mkString "") }
+                | '"' ~> chrExcept('"', '\n', EofCh).* <~ '"' ^^ { case chars => StringLit(chars mkString "") }
+                | '`' ~> chrExcept('`', '\n', EofCh).* <~ '`' ^^ { case chars => Identifier(chars mkString "") }
+                | EofCh ^^^ EOF
+                | '\'' ~> failure("unclosed string literal")
+                | '"' ~> failure("unclosed string literal")
+                | delim
+                | failure("illegal character")
+                )
+
+    override def identChar: Parser[Elem] = letter | elem('_')
+
+    override def whitespace: Parser[Any] =
+        (whitespaceChar
+                | '/' ~ '*' ~ comment
+                | '/' ~ '/' ~ chrExcept(EofCh, '\n').*
+                | '#' ~ chrExcept(EofCh, '\n').*
+                | '-' ~ '-' ~ chrExcept(EofCh, '\n').*
+                | '/' ~ '*' ~ failure("unclosed comment")
+                ).*
 }
 
