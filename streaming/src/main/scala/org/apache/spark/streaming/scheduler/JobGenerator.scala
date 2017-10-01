@@ -244,20 +244,31 @@ class JobGenerator(jobScheduler: JobScheduler) extends Logging {
     }
 
     /** Generate jobs and perform checkpoint for the given `time`.  */
+    /**
+      * 定时，调度generateJobs方法
+      * 传入一个time，时间，其实就是一个batch interval 内的时间段
+      */
     private def generateJobs(time: Time) {
         // Set the SparkEnv in this thread, so that job generation code can access the environment
         // Example: BlockRDDs are created in this thread, and it needs to access BlockManager
         // Update: This is probably redundant after threadlocal stuff in SparkEnv has been removed.
         SparkEnv.set(ssc.env)
         Try {
+            // 首先，第一步，找到ReceiverTracker，调用其allocateBlocksToBatch方法，将当前时间段内的block
+            // 分配给一个batch
+            // 并为其创建一个RDD
             jobScheduler.receiverTracker.allocateBlocksToBatch(time) // allocate received blocks to batch
+            // 然后调用DStreamGraph的generateJobs方法，来根据我们定义的DStream之间的依赖关系和算子，生成Job
             graph.generateJobs(time) // generate jobs using allocated block
         } match {
+                // 如果成功创建了Job
             case Success(jobs) =>
+                // 从ReceiverTracker中，获取到当前batch interval对应的block数据
                 val receivedBlockInfos =
                     jobScheduler.receiverTracker.getBlocksOfBatch(time).mapValues {
                         _.toArray
                     }
+                // 用JobScheduler提交job，其对应的原始数据，是那一批block
                 jobScheduler.submitJobSet(JobSet(time, jobs, receivedBlockInfos))
             case Failure(e) =>
                 jobScheduler.reportError("Error generating jobs for time " + time, e)
