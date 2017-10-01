@@ -28,163 +28,164 @@ import scala.concurrent._
 import ExecutionContext.Implicits.global
 
 /**
- * Abstract class that is responsible for supervising a Receiver in the worker.
- * It provides all the necessary interfaces for handling the data received by the receiver.
- */
+  * Abstract class that is responsible for supervising a Receiver in the worker.
+  * It provides all the necessary interfaces for handling the data received by the receiver.
+  */
 private[streaming] abstract class ReceiverSupervisor(
-    receiver: Receiver[_],
-    conf: SparkConf
-  ) extends Logging {
+        receiver: Receiver[_],
+        conf: SparkConf
+) extends Logging {
 
-  /** Enumeration to identify current state of the StreamingContext */
-  object ReceiverState extends Enumeration {
-    type CheckpointState = Value
-    val Initialized, Started, Stopped = Value
-  }
-  import ReceiverState._
+    /** Enumeration to identify current state of the StreamingContext */
+    object ReceiverState extends Enumeration {
+        type CheckpointState = Value
+        val Initialized, Started, Stopped = Value
+    }
 
-  // Attach the executor to the receiver
-  receiver.attachExecutor(this)
+    import ReceiverState._
 
-  /** Receiver id */
-  protected val streamId = receiver.streamId
+    // Attach the executor to the receiver
+    receiver.attachExecutor(this)
 
-  /** Has the receiver been marked for stop. */
-  private val stopLatch = new CountDownLatch(1)
+    /** Receiver id */
+    protected val streamId = receiver.streamId
 
-  /** Time between a receiver is stopped and started again */
-  private val defaultRestartDelay = conf.getInt("spark.streaming.receiverRestartDelay", 2000)
+    /** Has the receiver been marked for stop. */
+    private val stopLatch = new CountDownLatch(1)
 
-  /** Exception associated with the stopping of the receiver */
-  @volatile protected var stoppingError: Throwable = null
+    /** Time between a receiver is stopped and started again */
+    private val defaultRestartDelay = conf.getInt("spark.streaming.receiverRestartDelay", 2000)
 
-  /** State of the receiver */
-  @volatile private[streaming] var receiverState = Initialized
+    /** Exception associated with the stopping of the receiver */
+    @volatile protected var stoppingError: Throwable = null
 
-  /** Push a single data item to backend data store. */
-  def pushSingle(data: Any)
+    /** State of the receiver */
+    @volatile private[streaming] var receiverState = Initialized
 
-  /** Store the bytes of received data as a data block into Spark's memory. */
-  def pushBytes(
-      bytes: ByteBuffer,
-      optionalMetadata: Option[Any],
-      optionalBlockId: Option[StreamBlockId]
+    /** Push a single data item to backend data store. */
+    def pushSingle(data: Any)
+
+    /** Store the bytes of received data as a data block into Spark's memory. */
+    def pushBytes(
+            bytes: ByteBuffer,
+            optionalMetadata: Option[Any],
+            optionalBlockId: Option[StreamBlockId]
     )
 
-  /** Store a iterator of received data as a data block into Spark's memory. */
-  def pushIterator(
-      iterator: Iterator[_],
-      optionalMetadata: Option[Any],
-      optionalBlockId: Option[StreamBlockId]
+    /** Store a iterator of received data as a data block into Spark's memory. */
+    def pushIterator(
+            iterator: Iterator[_],
+            optionalMetadata: Option[Any],
+            optionalBlockId: Option[StreamBlockId]
     )
 
-  /** Store an ArrayBuffer of received data as a data block into Spark's memory. */
-  def pushArrayBuffer(
-      arrayBuffer: ArrayBuffer[_],
-      optionalMetadata: Option[Any],
-      optionalBlockId: Option[StreamBlockId]
+    /** Store an ArrayBuffer of received data as a data block into Spark's memory. */
+    def pushArrayBuffer(
+            arrayBuffer: ArrayBuffer[_],
+            optionalMetadata: Option[Any],
+            optionalBlockId: Option[StreamBlockId]
     )
 
-  /** Report errors. */
-  def reportError(message: String, throwable: Throwable)
+    /** Report errors. */
+    def reportError(message: String, throwable: Throwable)
 
-  /** Called when supervisor is started */
-  protected def onStart() { }
+    /** Called when supervisor is started */
+    protected def onStart() {}
 
-  /** Called when supervisor is stopped */
-  protected def onStop(message: String, error: Option[Throwable]) { }
+    /** Called when supervisor is stopped */
+    protected def onStop(message: String, error: Option[Throwable]) {}
 
-  /** Called when receiver is started */
-  protected def onReceiverStart() { }
+    /** Called when receiver is started */
+    protected def onReceiverStart() {}
 
-  /** Called when receiver is stopped */
-  protected def onReceiverStop(message: String, error: Option[Throwable]) { }
+    /** Called when receiver is stopped */
+    protected def onReceiverStop(message: String, error: Option[Throwable]) {}
 
-  /** Start the supervisor */
-  def start() {
-    onStart()
-    startReceiver()
-  }
-
-  /** Mark the supervisor and the receiver for stopping */
-  def stop(message: String, error: Option[Throwable]) {
-    stoppingError = error.orNull
-    stopReceiver(message, error)
-    onStop(message, error)
-    stopLatch.countDown()
-  }
-
-  /** Start receiver */
-  def startReceiver(): Unit = synchronized {
-    try {
-      logInfo("Starting receiver")
-      receiver.onStart()
-      logInfo("Called receiver onStart")
-      onReceiverStart()
-      receiverState = Started
-    } catch {
-      case t: Throwable =>
-        stop("Error starting receiver " + streamId, Some(t))
+    /** Start the supervisor */
+    def start() {
+        onStart()
+        startReceiver()
     }
-  }
 
-  /** Stop receiver */
-  def stopReceiver(message: String, error: Option[Throwable]): Unit = synchronized {
-    try {
-      logInfo("Stopping receiver with message: " + message + ": " + error.getOrElse(""))
-      receiverState = Stopped
-      receiver.onStop()
-      logInfo("Called receiver onStop")
-      onReceiverStop(message, error)
-    } catch {
-      case t: Throwable =>
-        logError("Error stopping receiver " + streamId + t.getStackTraceString)
+    /** Mark the supervisor and the receiver for stopping */
+    def stop(message: String, error: Option[Throwable]) {
+        stoppingError = error.orNull
+        stopReceiver(message, error)
+        onStop(message, error)
+        stopLatch.countDown()
     }
-  }
 
-  /** Restart receiver with delay */
-  def restartReceiver(message: String, error: Option[Throwable] = None) {
-    restartReceiver(message, error, defaultRestartDelay)
-  }
-
-  /** Restart receiver with delay */
-  def restartReceiver(message: String, error: Option[Throwable], delay: Int) {
-    Future {
-      logWarning("Restarting receiver with delay " + delay + " ms: " + message,
-        error.getOrElse(null))
-      stopReceiver("Restarting receiver with delay " + delay + "ms: " + message, error)
-      logDebug("Sleeping for " + delay)
-      Thread.sleep(delay)
-      logInfo("Starting receiver again")
-      startReceiver()
-      logInfo("Receiver started again")
+    /** Start receiver */
+    def startReceiver(): Unit = synchronized {
+        try {
+            logInfo("Starting receiver")
+            receiver.onStart()
+            logInfo("Called receiver onStart")
+            onReceiverStart()
+            receiverState = Started
+        } catch {
+            case t: Throwable =>
+                stop("Error starting receiver " + streamId, Some(t))
+        }
     }
-  }
 
-  /** Check if receiver has been marked for stopping */
-  def isReceiverStarted() = {
-    logDebug("state = " + receiverState)
-    receiverState == Started
-  }
-
-  /** Check if receiver has been marked for stopping */
-  def isReceiverStopped() = {
-    logDebug("state = " + receiverState)
-    receiverState == Stopped
-  }
-
-
-  /** Wait the thread until the supervisor is stopped */
-  def awaitTermination() {
-    stopLatch.await()
-    logInfo("Waiting for executor stop is over")
-    if (stoppingError != null) {
-      logError("Stopped executor with error: " + stoppingError)
-    } else {
-      logWarning("Stopped executor without error")
+    /** Stop receiver */
+    def stopReceiver(message: String, error: Option[Throwable]): Unit = synchronized {
+        try {
+            logInfo("Stopping receiver with message: " + message + ": " + error.getOrElse(""))
+            receiverState = Stopped
+            receiver.onStop()
+            logInfo("Called receiver onStop")
+            onReceiverStop(message, error)
+        } catch {
+            case t: Throwable =>
+                logError("Error stopping receiver " + streamId + t.getStackTraceString)
+        }
     }
-    if (stoppingError != null) {
-      throw stoppingError
+
+    /** Restart receiver with delay */
+    def restartReceiver(message: String, error: Option[Throwable] = None) {
+        restartReceiver(message, error, defaultRestartDelay)
     }
-  }
+
+    /** Restart receiver with delay */
+    def restartReceiver(message: String, error: Option[Throwable], delay: Int) {
+        Future {
+            logWarning("Restarting receiver with delay " + delay + " ms: " + message,
+                error.getOrElse(null))
+            stopReceiver("Restarting receiver with delay " + delay + "ms: " + message, error)
+            logDebug("Sleeping for " + delay)
+            Thread.sleep(delay)
+            logInfo("Starting receiver again")
+            startReceiver()
+            logInfo("Receiver started again")
+        }
+    }
+
+    /** Check if receiver has been marked for stopping */
+    def isReceiverStarted() = {
+        logDebug("state = " + receiverState)
+        receiverState == Started
+    }
+
+    /** Check if receiver has been marked for stopping */
+    def isReceiverStopped() = {
+        logDebug("state = " + receiverState)
+        receiverState == Stopped
+    }
+
+
+    /** Wait the thread until the supervisor is stopped */
+    def awaitTermination() {
+        stopLatch.await()
+        logInfo("Waiting for executor stop is over")
+        if (stoppingError != null) {
+            logError("Stopped executor with error: " + stoppingError)
+        } else {
+            logWarning("Stopped executor without error")
+        }
+        if (stoppingError != null) {
+            throw stoppingError
+        }
+    }
 }

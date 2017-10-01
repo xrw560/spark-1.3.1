@@ -23,26 +23,31 @@ import org.apache.spark.streaming.scheduler.Job
 import scala.reflect.ClassTag
 
 private[streaming]
-class ForEachDStream[T: ClassTag] (
-    parent: DStream[T],
-    foreachFunc: (RDD[T], Time) => Unit
-  ) extends DStream[Unit](parent.ssc) {
+class ForEachDStream[T: ClassTag](
+        parent: DStream[T],
+        foreachFunc: (RDD[T], Time) => Unit
+) extends DStream[Unit](parent.ssc) {
 
-  override def dependencies = List(parent)
+    override def dependencies = List(parent)
 
-  override def slideDuration: Duration = parent.slideDuration
+    override def slideDuration: Duration = parent.slideDuration
 
-  override def compute(validTime: Time): Option[RDD[Unit]] = None
+    override def compute(validTime: Time): Option[RDD[Unit]] = None
 
-  override def generateJob(time: Time): Option[Job] = {
-    parent.getOrCompute(time) match {
-      case Some(rdd) =>
-        val jobFunc = () => {
-          ssc.sparkContext.setCallSite(creationSite)
-          foreachFunc(rdd, time)
+    /**
+      * 所有的output操作，其实都会来调用ForEachDStream的generateJob()方法
+      * 所以说，每次执行DStreamGraph的时候，到了最后，都会调用到这里吧
+      * 然后呢，底层就会去触发job的提交
+      */
+    override def generateJob(time: Time): Option[Job] = {
+        parent.getOrCompute(time) match {
+            case Some(rdd) =>
+                val jobFunc = () => {
+                    ssc.sparkContext.setCallSite(creationSite)
+                    foreachFunc(rdd, time)
+                }
+                Some(new Job(time, jobFunc))
+            case None => None
         }
-        Some(new Job(time, jobFunc))
-      case None => None
     }
-  }
 }
