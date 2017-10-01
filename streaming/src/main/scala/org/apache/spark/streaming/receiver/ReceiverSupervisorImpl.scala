@@ -48,6 +48,10 @@ private[streaming] class ReceiverSupervisorImpl(
 ) extends ReceiverSupervisor(receiver, env.conf) with Logging {
 
     private val receivedBlockHandler: ReceivedBlockHandler = {
+        // 如果开启了预写日志机制，spark.streaming.receiver.writeAheadLog.enable，如果为true
+        // 那么receivedBlockHandler，就是WriteAheadLogBasedBlockHandler
+        // 如果没有开启预写日志机制
+        // 那么receivedBlockHandler，就是BlockManagerBasedBlockHandler
         if (env.conf.getBoolean("spark.streaming.receiver.writeAheadLog.enable", false)) {
             if (checkpointDirOption.isEmpty) {
                 throw new SparkException(
@@ -108,6 +112,7 @@ private[streaming] class ReceiverSupervisorImpl(
             reportError(message, throwable)
         }
 
+        // onPushBlock，就会去调用pushArrayBuffer，去推送block
         def onPushBlock(blockId: StreamBlockId, arrayBuffer: ArrayBuffer[_]) {
             pushArrayBuffer(arrayBuffer, None, Some(blockId))
         }
@@ -158,10 +163,14 @@ private[streaming] class ReceiverSupervisorImpl(
         }
 
         val time = System.currentTimeMillis
+        // 使用ReceiverBlockHandler，去调用storeBlock方法，存储block到BlockManager中
+        // 这里，就可以通过源码直接看出，预写日志的机制
         val blockStoreResult = receivedBlockHandler.storeBlock(blockId, receivedBlock)
         logDebug(s"Pushed block $blockId in ${(System.currentTimeMillis - time)} ms")
 
+        // 封装一个ReceivedBlockInfo对象，里面有一个streamId
         val blockInfo = ReceivedBlockInfo(streamId, numRecords, blockStoreResult)
+        // 调用了receiverTracker的Actor的ask方法，发送AddBlock消息
         val future = trackerActor.ask(AddBlock(blockInfo))(askTimeout)
         Await.result(future, askTimeout)
         logDebug(s"Reported block $blockId")

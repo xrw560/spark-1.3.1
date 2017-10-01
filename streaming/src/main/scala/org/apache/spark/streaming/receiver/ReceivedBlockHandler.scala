@@ -32,177 +32,187 @@ import org.apache.spark.util.{Clock, SystemClock, Utils}
 
 /** Trait that represents the metadata related to storage of blocks */
 private[streaming] trait ReceivedBlockStoreResult {
-  def blockId: StreamBlockId  // Any implementation of this trait will store a block id
+    def blockId: StreamBlockId // Any implementation of this trait will store a block id
 }
 
 /** Trait that represents a class that handles the storage of blocks received by receiver */
 private[streaming] trait ReceivedBlockHandler {
 
-  /** Store a received block with the given block id and return related metadata */
-  def storeBlock(blockId: StreamBlockId, receivedBlock: ReceivedBlock): ReceivedBlockStoreResult
+    /** Store a received block with the given block id and return related metadata */
+    def storeBlock(blockId: StreamBlockId, receivedBlock: ReceivedBlock): ReceivedBlockStoreResult
 
-  /** Cleanup old blocks older than the given threshold time */
-  def cleanupOldBlocks(threshTime: Long)
+    /** Cleanup old blocks older than the given threshold time */
+    def cleanupOldBlocks(threshTime: Long)
 }
 
 
 /**
- * Implementation of [[org.apache.spark.streaming.receiver.ReceivedBlockStoreResult]]
- * that stores the metadata related to storage of blocks using
- * [[org.apache.spark.streaming.receiver.BlockManagerBasedBlockHandler]]
- */
+  * Implementation of [[org.apache.spark.streaming.receiver.ReceivedBlockStoreResult]]
+  * that stores the metadata related to storage of blocks using
+  * [[org.apache.spark.streaming.receiver.BlockManagerBasedBlockHandler]]
+  */
 private[streaming] case class BlockManagerBasedStoreResult(blockId: StreamBlockId)
-  extends ReceivedBlockStoreResult
+        extends ReceivedBlockStoreResult
 
 
 /**
- * Implementation of a [[org.apache.spark.streaming.receiver.ReceivedBlockHandler]] which
- * stores the received blocks into a block manager with the specified storage level.
- */
+  * Implementation of a [[org.apache.spark.streaming.receiver.ReceivedBlockHandler]] which
+  * stores the received blocks into a block manager with the specified storage level.
+  */
 private[streaming] class BlockManagerBasedBlockHandler(
-    blockManager: BlockManager, storageLevel: StorageLevel)
-  extends ReceivedBlockHandler with Logging {
-  
-  def storeBlock(blockId: StreamBlockId, block: ReceivedBlock): ReceivedBlockStoreResult = {
-    val putResult: Seq[(BlockId, BlockStatus)] = block match {
-      case ArrayBufferBlock(arrayBuffer) =>
-        blockManager.putIterator(blockId, arrayBuffer.iterator, storageLevel, tellMaster = true)
-      case IteratorBlock(iterator) =>
-        blockManager.putIterator(blockId, iterator, storageLevel, tellMaster = true)
-      case ByteBufferBlock(byteBuffer) =>
-        blockManager.putBytes(blockId, byteBuffer, storageLevel, tellMaster = true)
-      case o =>
-        throw new SparkException(
-          s"Could not store $blockId to block manager, unexpected block type ${o.getClass.getName}")
-    }
-    if (!putResult.map { _._1 }.contains(blockId)) {
-      throw new SparkException(
-        s"Could not store $blockId to block manager with storage level $storageLevel")
-    }
-    BlockManagerBasedStoreResult(blockId)
-  }
+        blockManager: BlockManager, storageLevel: StorageLevel)
+        extends ReceivedBlockHandler with Logging {
 
-  def cleanupOldBlocks(threshTime: Long) {
-    // this is not used as blocks inserted into the BlockManager are cleared by DStream's clearing
-    // of BlockRDDs.
-  }
+    def storeBlock(blockId: StreamBlockId, block: ReceivedBlock): ReceivedBlockStoreResult = {
+        // 普通的，就是直接将数据保存到BlockManager中，就ok了
+        val putResult: Seq[(BlockId, BlockStatus)] = block match {
+            case ArrayBufferBlock(arrayBuffer) =>
+                blockManager.putIterator(blockId, arrayBuffer.iterator, storageLevel, tellMaster = true)
+            case IteratorBlock(iterator) =>
+                blockManager.putIterator(blockId, iterator, storageLevel, tellMaster = true)
+            case ByteBufferBlock(byteBuffer) =>
+                blockManager.putBytes(blockId, byteBuffer, storageLevel, tellMaster = true)
+            case o =>
+                throw new SparkException(
+                    s"Could not store $blockId to block manager, unexpected block type ${o.getClass.getName}")
+        }
+        if (!putResult.map {
+            _._1
+        }.contains(blockId)) {
+            throw new SparkException(
+                s"Could not store $blockId to block manager with storage level $storageLevel")
+        }
+        BlockManagerBasedStoreResult(blockId)
+    }
+
+    def cleanupOldBlocks(threshTime: Long) {
+        // this is not used as blocks inserted into the BlockManager are cleared by DStream's clearing
+        // of BlockRDDs.
+    }
 }
 
 
 /**
- * Implementation of [[org.apache.spark.streaming.receiver.ReceivedBlockStoreResult]]
- * that stores the metadata related to storage of blocks using
- * [[org.apache.spark.streaming.receiver.WriteAheadLogBasedBlockHandler]]
- */
+  * Implementation of [[org.apache.spark.streaming.receiver.ReceivedBlockStoreResult]]
+  * that stores the metadata related to storage of blocks using
+  * [[org.apache.spark.streaming.receiver.WriteAheadLogBasedBlockHandler]]
+  */
 private[streaming] case class WriteAheadLogBasedStoreResult(
-    blockId: StreamBlockId,
-    segment: WriteAheadLogFileSegment
-  ) extends ReceivedBlockStoreResult
+        blockId: StreamBlockId,
+        segment: WriteAheadLogFileSegment
+) extends ReceivedBlockStoreResult
 
 
 /**
- * Implementation of a [[org.apache.spark.streaming.receiver.ReceivedBlockHandler]] which
- * stores the received blocks in both, a write ahead log and a block manager.
- */
+  * Implementation of a [[org.apache.spark.streaming.receiver.ReceivedBlockHandler]] which
+  * stores the received blocks in both, a write ahead log and a block manager.
+  */
 private[streaming] class WriteAheadLogBasedBlockHandler(
-    blockManager: BlockManager,
-    streamId: Int,
-    storageLevel: StorageLevel,
-    conf: SparkConf,
-    hadoopConf: Configuration,
-    checkpointDir: String,
-    clock: Clock = new SystemClock
-  ) extends ReceivedBlockHandler with Logging {
+        blockManager: BlockManager,
+        streamId: Int,
+        storageLevel: StorageLevel,
+        conf: SparkConf,
+        hadoopConf: Configuration,
+        checkpointDir: String,
+        clock: Clock = new SystemClock
+) extends ReceivedBlockHandler with Logging {
 
-  private val blockStoreTimeout = conf.getInt(
-    "spark.streaming.receiver.blockStoreTimeout", 30).seconds
-  private val rollingInterval = conf.getInt(
-    "spark.streaming.receiver.writeAheadLog.rollingInterval", 60)
-  private val maxFailures = conf.getInt(
-    "spark.streaming.receiver.writeAheadLog.maxFailures", 3)
+    private val blockStoreTimeout = conf.getInt(
+        "spark.streaming.receiver.blockStoreTimeout", 30).seconds
+    private val rollingInterval = conf.getInt(
+        "spark.streaming.receiver.writeAheadLog.rollingInterval", 60)
+    private val maxFailures = conf.getInt(
+        "spark.streaming.receiver.writeAheadLog.maxFailures", 3)
 
-  private val effectiveStorageLevel = {
-    if (storageLevel.deserialized) {
-      logWarning(s"Storage level serialization ${storageLevel.deserialized} is not supported when" +
-        s" write ahead log is enabled, change to serialization false")
-    }
-    if (storageLevel.replication > 1) {
-      logWarning(s"Storage level replication ${storageLevel.replication} is unnecessary when " +
-        s"write ahead log is enabled, change to replication 1")
-    }
+    private val effectiveStorageLevel = {
+        if (storageLevel.deserialized) {
+            logWarning(s"Storage level serialization ${storageLevel.deserialized} is not supported when" +
+                    s" write ahead log is enabled, change to serialization false")
+        }
+        if (storageLevel.replication > 1) {
+            logWarning(s"Storage level replication ${storageLevel.replication} is unnecessary when " +
+                    s"write ahead log is enabled, change to replication 1")
+        }
 
-    StorageLevel(storageLevel.useDisk, storageLevel.useMemory, storageLevel.useOffHeap, false, 1)
-  }
-
-  if (storageLevel != effectiveStorageLevel) {
-    logWarning(s"User defined storage level $storageLevel is changed to effective storage level " +
-      s"$effectiveStorageLevel when write ahead log is enabled")
-  }
-
-  // Manages rolling log files
-  private val logManager = new WriteAheadLogManager(
-    checkpointDirToLogDir(checkpointDir, streamId),
-    hadoopConf, rollingInterval, maxFailures,
-    callerName = this.getClass.getSimpleName,
-    clock = clock
-  )
-
-  // For processing futures used in parallel block storing into block manager and write ahead log
-  // # threads = 2, so that both writing to BM and WAL can proceed in parallel
-  implicit private val executionContext = ExecutionContext.fromExecutorService(
-    Utils.newDaemonFixedThreadPool(2, this.getClass.getSimpleName))
-
-  /**
-   * This implementation stores the block into the block manager as well as a write ahead log.
-   * It does this in parallel, using Scala Futures, and returns only after the block has
-   * been stored in both places.
-   */
-  def storeBlock(blockId: StreamBlockId, block: ReceivedBlock): ReceivedBlockStoreResult = {
-
-    // Serialize the block so that it can be inserted into both
-    val serializedBlock = block match {
-      case ArrayBufferBlock(arrayBuffer) =>
-        blockManager.dataSerialize(blockId, arrayBuffer.iterator)
-      case IteratorBlock(iterator) =>
-        blockManager.dataSerialize(blockId, iterator)
-      case ByteBufferBlock(byteBuffer) =>
-        byteBuffer
-      case _ =>
-        throw new Exception(s"Could not push $blockId to block manager, unexpected block type")
+        StorageLevel(storageLevel.useDisk, storageLevel.useMemory, storageLevel.useOffHeap, false, 1)
     }
 
-    // Store the block in block manager
-    val storeInBlockManagerFuture = Future {
-      val putResult =
-        blockManager.putBytes(blockId, serializedBlock, effectiveStorageLevel, tellMaster = true)
-      if (!putResult.map { _._1 }.contains(blockId)) {
-        throw new SparkException(
-          s"Could not store $blockId to block manager with storage level $storageLevel")
-      }
+    if (storageLevel != effectiveStorageLevel) {
+        logWarning(s"User defined storage level $storageLevel is changed to effective storage level " +
+                s"$effectiveStorageLevel when write ahead log is enabled")
     }
 
-    // Store the block in write ahead log
-    val storeInWriteAheadLogFuture = Future {
-      logManager.writeToLog(serializedBlock)
+    // Manages rolling log files
+    private val logManager = new WriteAheadLogManager(
+        checkpointDirToLogDir(checkpointDir, streamId),
+        hadoopConf, rollingInterval, maxFailures,
+        callerName = this.getClass.getSimpleName,
+        clock = clock
+    )
+
+    // For processing futures used in parallel block storing into block manager and write ahead log
+    // # threads = 2, so that both writing to BM and WAL can proceed in parallel
+    implicit private val executionContext = ExecutionContext.fromExecutorService(
+        Utils.newDaemonFixedThreadPool(2, this.getClass.getSimpleName))
+
+    /**
+      * This implementation stores the block into the block manager as well as a write ahead log.
+      * It does this in parallel, using Scala Futures, and returns only after the block has
+      * been stored in both places.
+      */
+    def storeBlock(blockId: StreamBlockId, block: ReceivedBlock): ReceivedBlockStoreResult = {
+
+        // 先用BlockManager序列化了数据
+        // Serialize the block so that it can be inserted into both
+        val serializedBlock = block match {
+            case ArrayBufferBlock(arrayBuffer) =>
+                blockManager.dataSerialize(blockId, arrayBuffer.iterator)
+            case IteratorBlock(iterator) =>
+                blockManager.dataSerialize(blockId, iterator)
+            case ByteBufferBlock(byteBuffer) =>
+                byteBuffer
+            case _ =>
+                throw new Exception(s"Could not push $blockId to block manager, unexpected block type")
+        }
+
+        // 将数据保存到BlockManager中去，
+        // 默认的持久化机制，StorageLevel，是带_SER，_2的，会序列化，会复制一份副本到其他executor的
+        // BlockManager上，以供容错
+        // Store the block in block manager
+        val storeInBlockManagerFuture = Future {
+            val putResult =
+                blockManager.putBytes(blockId, serializedBlock, effectiveStorageLevel, tellMaster = true)
+            if (!putResult.map {
+                _._1
+            }.contains(blockId)) {
+                throw new SparkException(
+                    s"Could not store $blockId to block manager with storage level $storageLevel")
+            }
+        }
+
+        // 将block存入预写日志，通过logManager的writeToLog方法
+        // Store the block in write ahead log
+        val storeInWriteAheadLogFuture = Future {
+            logManager.writeToLog(serializedBlock)
+        }
+
+        // Combine the futures, wait for both to complete, and return the write ahead log segment
+        val combinedFuture = storeInBlockManagerFuture.zip(storeInWriteAheadLogFuture).map(_._2)
+        val segment = Await.result(combinedFuture, blockStoreTimeout)
+        WriteAheadLogBasedStoreResult(blockId, segment)
     }
 
-    // Combine the futures, wait for both to complete, and return the write ahead log segment
-    val combinedFuture = storeInBlockManagerFuture.zip(storeInWriteAheadLogFuture).map(_._2)
-    val segment = Await.result(combinedFuture, blockStoreTimeout)
-    WriteAheadLogBasedStoreResult(blockId, segment)
-  }
+    def cleanupOldBlocks(threshTime: Long) {
+        logManager.cleanupOldLogs(threshTime, waitForCompletion = false)
+    }
 
-  def cleanupOldBlocks(threshTime: Long) {
-    logManager.cleanupOldLogs(threshTime, waitForCompletion = false)
-  }
-
-  def stop() {
-    logManager.stop()
-  }
+    def stop() {
+        logManager.stop()
+    }
 }
 
 private[streaming] object WriteAheadLogBasedBlockHandler {
-  def checkpointDirToLogDir(checkpointDir: String, streamId: Int): String = {
-    new Path(checkpointDir, new Path("receivedData", streamId.toString)).toString
-  }
+    def checkpointDirToLogDir(checkpointDir: String, streamId: Int): String = {
+        new Path(checkpointDir, new Path("receivedData", streamId.toString)).toString
+    }
 }
