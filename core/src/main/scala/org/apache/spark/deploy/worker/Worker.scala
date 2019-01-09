@@ -357,7 +357,7 @@ private[spark] class Worker(
                         }.toSeq
                     }
                     appDirectories(appId) = appLocalDirs
-                    //TODO 创建一个ExecutorRunner，将参数都放到其中，然后在通过他启动Executor
+                    //TODO 创建一个ExecutorRunner，将参数都放到其中，然后再通过它启动Executor
                     // 创建ExecutorRunner
                     val manager = new ExecutorRunner(
                         appId,
@@ -375,7 +375,7 @@ private[spark] class Worker(
                         akkaUrl,
                         conf,
                         appLocalDirs, ExecutorState.LOADING)
-                    //TODO 把ExecutorDI -> Executor放到一个Map中了
+                    //TODO 把ExecutorID -> Executor放到一个Map中了
                     // 把executorRunner加入本地缓存
                     executors(appId + "/" + execId) = manager
                     //TODO 调用ExecutorRunner的start方法来启动Executor java子进程

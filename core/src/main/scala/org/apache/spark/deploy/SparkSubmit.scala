@@ -535,6 +535,7 @@ object SparkSubmit {
     var mainClass: Class[_] = null
 
     try {
+      // TODO 通过反射调用自定义类的main方法(只有一个进程)
       mainClass = Class.forName(childMainClass, true, loader)
     } catch {
       case e: ClassNotFoundException =>

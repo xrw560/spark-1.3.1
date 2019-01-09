@@ -339,7 +339,7 @@ private[spark] class Master(
             }
         }
 
-        //TODO Worker发送给Master的消息，告诉Master Executor已经启动
+        //TODO Worker发送给Master的消息，告诉Master: Executor已经启动
         case ExecutorStateChanged(appId, execId, state, message, exitStatus) => {
             //找到executor对应的app，然后再反过来通过app内部的executors缓存获取executor信息
             val execOption = idToApp.get(appId).flatMap(app => app.executors.get(execId))
