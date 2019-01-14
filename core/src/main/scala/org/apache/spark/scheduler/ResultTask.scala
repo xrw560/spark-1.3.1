@@ -53,7 +53,7 @@ private[spark] class ResultTask[T, U](
 
     override def runTask(context: TaskContext): U = {
         // Deserialize the RDD and the func using the broadcast variables.
-        //得到一个序列化器
+        // 得到一个序列化器
         // 进行了基本的反序列化
         val ser = SparkEnv.get.closureSerializer.newInstance()
         //反序列化Task，得到RDD和作用在RDD上的函数

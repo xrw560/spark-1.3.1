@@ -933,7 +933,7 @@ class PairRDDFunctions[K, V](self: RDD[(K, V)])
         // Doesn't work in Scala 2.9 due to what may be a generics bug
         // TODO: Should we uncomment this for Scala 2.10?
         // conf.setOutputFormat(outputFormatClass)
-        //TODO 准备一下HDFS的参数
+        //TODO 准备一些HDFS的参数
         hadoopConf.set("mapred.output.format.class", outputFormatClass.getName)
         for (c <- codec) {
             hadoopConf.setCompressMapOutput(true)

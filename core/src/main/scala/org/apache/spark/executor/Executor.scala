@@ -482,7 +482,7 @@ private[spark] class Executor(
                             }
                         }
                     }
-                    //TODO Executor发送给DirverActor的心跳信息
+                    //TODO Executor发送给DriverActor的心跳信息
                     val message = Heartbeat(executorId, tasksMetrics.toArray, env.blockManager.blockManagerId)
                     try {
                         val response = AkkaUtils.askWithReply[HeartbeatResponse](message, heartbeatReceiverRef,

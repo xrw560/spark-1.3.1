@@ -61,7 +61,7 @@ private[spark] class CoarseGrainedExecutorBackend(
         //TODO 跟Driver建立连接
         // 获取了driver的actor
         driver = context.actorSelection(driverUrl)
-        //TODO Executor向DriverActor发送消息，来注册Exectuor
+        //TODO Executor向DriverActor发送消息，来注册Executor
         // 向driver发送RegisterExecutor消息
         driver ! RegisterExecutor(executorId, hostPort, cores, extractLogUrls)
         context.system.eventStream.subscribe(self, classOf[RemotingLifecycleEvent])
@@ -74,7 +74,7 @@ private[spark] class CoarseGrainedExecutorBackend(
     }
 
     override def receiveWithLogging = {
-        //TODO DirverActor发送给Executor的消息，告诉她已经注册成功
+        //TODO DriverActor发送给Executor的消息，告诉它已经注册成功
         // driver注册executor成功之后，会发送回来RegisteredExecutor消息
         // 此时，CoarseGrainedExecutorBackend，会创建Executor对象，作为执行句柄
         // 其实它的大部分功能，都是通过Executor实现的
@@ -88,7 +88,7 @@ private[spark] class CoarseGrainedExecutorBackend(
             logError("Slave registration failed: " + message)
             System.exit(1)
 
-        //TODO DirverActor发送给Executor的消息，让Executor启动计算任务
+        //TODO DriverActor发送给Executor的消息，让Executor启动计算任务
             // 启动task
         case LaunchTask(data) =>
             if (executor == null) {

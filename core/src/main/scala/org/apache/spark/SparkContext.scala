@@ -1485,7 +1485,7 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
         if (conf.getBoolean("spark.logLineage", false)) {
             logInfo("RDD's recursive dependencies:\n" + rdd.toDebugString)
         }
-        //TODO 传说中的DAGScheduler出现了，用于切分成Stage,然后在转换成TaskSet给TaskScheduler再提交给Executor
+        //TODO 传说中的DAGScheduler出现了，用于切分成Stage,然后再转换成TaskSet给TaskScheduler再提交给Executor
         // 调用SparkContext，之前初始化时创建到DAGScheduler的runJob()方法
         dagScheduler.runJob(rdd, cleanedFunc, partitions, callSite, allowLocal,
             resultHandler, localProperties.get)

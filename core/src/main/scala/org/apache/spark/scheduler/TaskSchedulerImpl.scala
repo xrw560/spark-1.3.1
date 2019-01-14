@@ -193,7 +193,7 @@ private[spark] class TaskSchedulerImpl(
             hasReceivedTask = true
         }
         //TODO 向发消息的任务
-        // parkContext原理解析的时候，讲过，创建TaskScheduler的时候，一件非常重要的事情，就是为TaskSchedulerImpl
+        // SparkContext原理解析的时候，讲过，创建TaskScheduler的时候，一件非常重要的事情，就是为TaskSchedulerImpl
         // 创建一个SparkDeploySchedulerBackend，这里的backend，指的就是之前创建好的SparkDeploySchedulerBackend
         // 而且这个backend是负责创建AppClient，向Master注册Application的
         backend.reviveOffers()

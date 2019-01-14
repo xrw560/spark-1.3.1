@@ -233,7 +233,6 @@ class DAGScheduler(
                 // We are going to register ancestor shuffle dependencies
                 registerShuffleDependencies(shuffleDep, jobId)
                 // Then register current shuffleDep
-
                 val stage =
                 //TODO  创建服父Stage
                     newOrUsedStage(
@@ -765,11 +764,10 @@ class DAGScheduler(
         submitWaitingStages()
     }
 
-    //TODO 用切stage
+    //TODO 用于切stage
     /**
       * DAGScheduler的job调度的核心入口
       */
-
     private[scheduler] def handleJobSubmitted(jobId: Int,
             finalRDD: RDD[_],
             func: (TaskContext, Iterator[_]) => _,
@@ -889,7 +887,7 @@ class DAGScheduler(
     }
 
     /** Called when stage's parents are available and we can now do its task. */
-    //TODO DAG提交Stage个TaskScheduler
+    //TODO DAG提交Stage给TaskScheduler
     /**
       * 提交stage，为stage创建一批task，task数量与partition数量相同
       */
@@ -964,7 +962,7 @@ class DAGScheduler(
                     // 给每个task计算最佳位置
                 val locs = getPreferredLocs(stage.rdd, id)
                 val part = stage.rdd.partitions(id)
-                //ShuffleMapTask用于拉取上游的数据
+                // ShuffleMapTask用于拉取上游的数据
                 // 然后对于finalStage之外的stage，它的isShuffleMap都是true
                 // 所以会创建ShuffleMapTask
                 new ShuffleMapTask(stage.id, taskBinary, part, locs)
