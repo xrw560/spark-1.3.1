@@ -152,7 +152,7 @@ class StreamingContext private[streaming](
     private[streaming] val env = SparkEnv.get
 
     /**
-      * 这里是不是就是我们之前提到的，很重要的组建，DStreamGraph
+      * 这里是不是就是我们之前提到的，很重要的组件，DStreamGraph
       * 这个里面就保存了，我们定义的Spark Streaming Application中，一系列的DStream的依赖关系
       * 以及相互之间的算子的应用
       */
@@ -185,8 +185,8 @@ class StreamingContext private[streaming](
     }
 
     // JobScheduler，非常重要，涉及到job的调度
-    // JobGenerator会负责每个batch interval，生成一个job，然后通过JobScheduler来调度和提交Job
-    // 底层，其实还是基于Spark的核心计算引擎，底层DAGScheduler，TaskScheduler、Worker、Executor、Task
+    // JobGenerator会负责每隔batch interval，生成一个job，然后通过JobScheduler来调度和提交Job
+    // 底层，其实还是基于Spark的核心计算引擎，底层还是DAGScheduler，TaskScheduler、Worker、Executor、Task
     // 如果你定义了reduceByKey这种算子，还是会有shuffle
     // 而且底层的数据存取组件，还是executor关联的BlockManager
     // 负责持久化数据存储的高层组件，还是CacheManager
@@ -558,7 +558,7 @@ class StreamingContext private[streaming](
         validate()
         sparkContext.setCallSite(DStream.getCreationSite())
 
-        // 最最重要的，是去调用了JobScheduler的start()方法
+        // TODO 最最重要的，是去调用了JobScheduler的start()方法
         scheduler.start()
         state = Started
     }

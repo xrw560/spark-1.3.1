@@ -91,7 +91,7 @@ private[streaming] class BlockGenerator(
     private val blockQueueSize = conf.getInt("spark.streaming.blockQueueSize", 10)
     // blocksForPushing队列，ArrayBlockingQueue
     private val blocksForPushing = new ArrayBlockingQueue[Block](blockQueueSize)
-    // blockPushingThread，后天线程，启动之后，就会调用keepPushingBlocks方法
+    // blockPushingThread，后台线程，启动之后，就会调用keepPushingBlocks方法
     // 这个方法中，就会每隔一段时间，去blocksForPushing队列中取block
     private val blockPushingThread = new Thread() {
         override def run() {
@@ -106,7 +106,7 @@ private[streaming] class BlockGenerator(
     /** Start block generating and pushing threads. */
     def start() {
         // BlockGenerator.start()方法
-        // 其实就是启动内部的两个关键后台
+        // 其实就是启动内部的两个关键后台线程
         // 一个是blockIntervalTimer，负责将currentBuffer中的原始数据，打包成一个一个的block
         // 一个是blockPushingThread，负责将blockForPushing中的block，调用pushArrayBuffer()方法
         blockIntervalTimer.start()
@@ -176,7 +176,7 @@ private[streaming] class BlockGenerator(
                 // 这边，是不是从blocksForPushing这个队列中，poll出来了当前队列的队首的block
                 // 对于阻塞队列，默认设置了100ms的超时
                 Option(blocksForPushing.poll(100, TimeUnit.MILLISECONDS)) match {
-                        // 如果拿到了block，调用pushBlock，去推送block
+                    // 如果拿到了block，调用pushBlock，去推送block
                     case Some(block) => pushBlock(block)
                     case None =>
                 }

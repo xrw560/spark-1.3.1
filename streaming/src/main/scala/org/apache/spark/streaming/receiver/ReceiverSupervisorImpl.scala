@@ -185,9 +185,9 @@ private[streaming] class ReceiverSupervisorImpl(
 
     override protected def onStart() {
         // 这里，启动了一个BlockGenerator，非常非常之重要
-        // 后面，将数据接收的时候，就主要讲的就是它，运行在worker的executor端负责数据接收后的一些存取工作
+        // 后面，讲数据接收的时候，就主要讲的就是它，运行在worker的executor端负责数据接收后的一些存取工作
         // 以及配合ReceiverTracker
-        // 所以，在excutor上，启动Receiver之前，就会先启动这个Receiver，相关的一个BlockGenerator
+        // 所以，在executor上，启动Receiver之前，就会先启动这个Receiver，相关的一个BlockGenerator
         // 该组件，在数据接收中，极其极其重要
         blockGenerator.start()
     }
